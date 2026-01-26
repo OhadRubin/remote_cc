@@ -777,12 +777,98 @@ async def terminal_ui():
                 flex: 1;
                 overflow: hidden;
             }
+            .modal {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0,0,0,0.7);
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                z-index: 1000;
+            }
+            .modal.hidden { display: none; }
+            .modal-content {
+                background: #16213e;
+                border-radius: 8px;
+                min-width: 400px;
+                max-width: 600px;
+                max-height: 80vh;
+                overflow: hidden;
+                display: flex;
+                flex-direction: column;
+            }
+            .modal-header {
+                padding: 12px 16px;
+                background: #0f0f23;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-weight: bold;
+            }
+            .close-modal-btn {
+                background: transparent;
+                border: none;
+                color: #888;
+                font-size: 20px;
+                cursor: pointer;
+            }
+            .close-modal-btn:hover { color: #dc3545; }
+            #sessions-list {
+                padding: 12px;
+                overflow-y: auto;
+                flex: 1;
+            }
+            .session-item {
+                padding: 10px 12px;
+                background: #1a1a2e;
+                border-radius: 4px;
+                margin-bottom: 8px;
+                cursor: pointer;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .session-item:hover { background: #28a745; }
+            .session-item .session-name { font-weight: bold; }
+            .session-item .session-meta { font-size: 11px; color: #888; }
+            .session-item:hover .session-meta { color: #ccc; }
+            .modal-footer {
+                padding: 12px 16px;
+                background: #0f0f23;
+                text-align: right;
+            }
+            .modal-footer button {
+                background: #444;
+                color: #fff;
+                border: none;
+                padding: 8px 16px;
+                cursor: pointer;
+                border-radius: 3px;
+            }
+            .modal-footer button:hover { background: #555; }
+            .no-sessions { color: #888; text-align: center; padding: 20px; }
         </style>
     </head>
     <body>
         <div id="config-panel">
             <button id="add-btn">+ New Tab</button>
+            <button id="sessions-btn">Sessions</button>
             <button id="close-btn" class="danger hidden">Close All</button>
+        </div>
+        <div id="sessions-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <span>Available Sessions</span>
+                    <button class="close-modal-btn">×</button>
+                </div>
+                <div id="sessions-list"></div>
+                <div class="modal-footer">
+                    <button id="refresh-sessions-btn">Refresh</button>
+                </div>
+            </div>
         </div>
         <div id="status">Click "New Tab" to open a terminal.</div>
         <div id="panes-container"></div>
@@ -838,6 +924,17 @@ async def terminal_ui():
                 view.setUint16(0, width, false);
                 view.setUint16(2, height, false);
                 return encodeMessage(MessageType.RESIZE, new Uint8Array(payload));
+            }
+
+            function encodeAttach(sessionId) {
+                const payload = new ArrayBuffer(4);
+                const view = new DataView(payload);
+                view.setUint32(0, sessionId, false);
+                return encodeMessage(MessageType.ATTACH, new Uint8Array(payload));
+            }
+
+            function encodeListSessions() {
+                return encodeMessage(MessageType.LIST_SESSIONS, new Uint8Array(0));
             }
 
             function decodeMessages(buffer) {
@@ -1030,8 +1127,209 @@ async def terminal_ui():
                 document.getElementById('status').textContent = 'All tabs closed.';
             }
 
+            function decodeSessionInfo(payload) {
+                const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+                let offset = 0;
+                const sessionId = view.getUint32(offset, false); offset += 4;
+                const nameLen = view.getUint32(offset, false); offset += 4;
+                const name = new TextDecoder().decode(payload.slice(offset, offset + nameLen)); offset += nameLen;
+                const paneId = view.getUint32(offset, false); offset += 4;
+                const pid = view.getUint32(offset, false); offset += 4;
+                const width = view.getUint16(offset, false); offset += 2;
+                const height = view.getUint16(offset, false); offset += 2;
+                const createdAt = view.getFloat64(offset, false); offset += 8;
+                const attachedCount = view.getUint32(offset, false);
+                return { sessionId, name, paneId, pid, width, height, createdAt, attachedCount };
+            }
+
+            function showSessionsModal() {
+                document.getElementById('sessions-modal').classList.remove('hidden');
+                refreshSessionsList();
+            }
+
+            function hideSessionsModal() {
+                document.getElementById('sessions-modal').classList.add('hidden');
+            }
+
+            function refreshSessionsList() {
+                const listEl = document.getElementById('sessions-list');
+                listEl.innerHTML = '<div class="no-sessions">Loading...</div>';
+
+                const ws = new WebSocket(wsUrl);
+                ws.binaryType = 'arraybuffer';
+                const sessions = [];
+                let recvBuffer = new ArrayBuffer(0);
+
+                ws.onopen = () => {
+                    ws.send(encodeIdentify(80, 24));
+                    ws.send(encodeListSessions());
+                };
+
+                ws.onmessage = (event) => {
+                    const combined = new Uint8Array(recvBuffer.byteLength + event.data.byteLength);
+                    combined.set(new Uint8Array(recvBuffer), 0);
+                    combined.set(new Uint8Array(event.data), recvBuffer.byteLength);
+                    const { messages, remaining } = decodeMessages(combined.buffer);
+                    recvBuffer = remaining;
+
+                    for (const msg of messages) {
+                        if (msg.type === MessageType.SESSION_INFO) {
+                            sessions.push(decodeSessionInfo(msg.payload));
+                        }
+                    }
+                };
+
+                setTimeout(() => {
+                    ws.close();
+                    renderSessionsList(sessions);
+                }, 300);
+            }
+
+            function renderSessionsList(sessions) {
+                const listEl = document.getElementById('sessions-list');
+                if (sessions.length === 0) {
+                    listEl.innerHTML = '<div class="no-sessions">No existing sessions. Create a new tab first.</div>';
+                    return;
+                }
+                listEl.innerHTML = sessions.map(s => {
+                    const date = new Date(s.createdAt * 1000);
+                    const timeStr = date.toLocaleTimeString();
+                    return `
+                        <div class="session-item" data-session-id="${s.sessionId}">
+                            <div>
+                                <div class="session-name">${s.name}</div>
+                                <div class="session-meta">ID: ${s.sessionId} | ${s.width}x${s.height} | PID: ${s.pid}</div>
+                            </div>
+                            <div class="session-meta">${s.attachedCount} attached | ${timeStr}</div>
+                        </div>
+                    `;
+                }).join('');
+
+                listEl.querySelectorAll('.session-item').forEach(el => {
+                    el.addEventListener('click', () => {
+                        const sessionId = parseInt(el.dataset.sessionId, 10);
+                        hideSessionsModal();
+                        attachToSession(sessionId);
+                    });
+                });
+            }
+
+            function attachToSession(sessionId) {
+                tabCounter++;
+                const tabName = `Tab ${tabCounter} (reconnect)`;
+
+                const container = document.getElementById('panes-container');
+                const paneDiv = document.createElement('div');
+                paneDiv.className = 'pane';
+
+                const header = document.createElement('div');
+                header.className = 'pane-header';
+                header.innerHTML = `<span>${tabName}</span><button class="close-btn" title="Close">×</button>`;
+                paneDiv.appendChild(header);
+
+                const termDiv = document.createElement('div');
+                termDiv.className = 'pane-terminal';
+                paneDiv.appendChild(termDiv);
+
+                container.appendChild(paneDiv);
+
+                const term = new Terminal({
+                    cursorBlink: true,
+                    fontSize: 12,
+                    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                    theme: { background: '#1a1a2e', foreground: '#eee' }
+                });
+                const fitAddon = new FitAddon.FitAddon();
+                term.loadAddon(fitAddon);
+                term.open(termDiv);
+
+                const pane = {
+                    tabName, term, fitAddon, header, paneDiv,
+                    ws: null, recvBuffer: new ArrayBuffer(0), sessionActive: false,
+                };
+
+                header.querySelector('.close-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    closePane(pane);
+                });
+
+                paneDiv.addEventListener('click', () => setActivePane(pane));
+
+                panes.push(pane);
+                updateGridLayout();
+
+                pane.ws = new WebSocket(wsUrl);
+                pane.ws.binaryType = 'arraybuffer';
+
+                pane.ws.onopen = () => {
+                    term.write('\\x1b[33mReconnecting to session...\\x1b[0m\\r\\n');
+                    pane.ws.send(encodeIdentify(term.cols, term.rows));
+                    pane.ws.send(encodeAttach(sessionId));
+                };
+
+                pane.ws.onmessage = (event) => {
+                    const combined = new Uint8Array(pane.recvBuffer.byteLength + event.data.byteLength);
+                    combined.set(new Uint8Array(pane.recvBuffer), 0);
+                    combined.set(new Uint8Array(event.data), pane.recvBuffer.byteLength);
+                    const { messages, remaining } = decodeMessages(combined.buffer);
+                    pane.recvBuffer = remaining;
+
+                    for (const msg of messages) {
+                        if (msg.type === MessageType.OUTPUT) {
+                            const text = new TextDecoder().decode(msg.payload);
+                            term.write(text);
+                        } else if (msg.type === MessageType.SESSION_INFO) {
+                            if (!pane.sessionActive) {
+                                pane.sessionActive = true;
+                                const info = decodeSessionInfo(msg.payload);
+                                header.querySelector('span').textContent = `${info.name} (reconnected)`;
+                                term.write('\\x1b[32mReconnected!\\x1b[0m\\r\\n');
+                            }
+                        } else if (msg.type === MessageType.ERROR) {
+                            const errLen = new DataView(msg.payload.buffer, msg.payload.byteOffset).getUint32(0, false);
+                            const errText = new TextDecoder().decode(msg.payload.slice(4, 4 + errLen));
+                            term.write(`\\x1b[31mError: ${errText}\\x1b[0m\\r\\n`);
+                        } else if (msg.type === MessageType.SHELL_EXITED) {
+                            term.write('\\x1b[33mShell exited\\x1b[0m\\r\\n');
+                            pane.sessionActive = false;
+                        }
+                    }
+                };
+
+                pane.ws.onclose = () => {
+                    term.write('\\x1b[31mDisconnected\\x1b[0m\\r\\n');
+                    pane.sessionActive = false;
+                };
+
+                pane.ws.onerror = () => {
+                    term.write('\\x1b[31mConnection error\\x1b[0m\\r\\n');
+                };
+
+                term.onData((data) => {
+                    if (pane.ws && pane.ws.readyState === WebSocket.OPEN && pane.sessionActive) {
+                        pane.ws.send(encodeInput(data));
+                    }
+                });
+
+                term.onResize(({ cols, rows }) => {
+                    if (pane.ws && pane.ws.readyState === WebSocket.OPEN && pane.sessionActive) {
+                        pane.ws.send(encodeResize(cols, rows));
+                    }
+                });
+
+                setActivePane(pane);
+                document.getElementById('close-btn').classList.remove('hidden');
+                document.getElementById('status').textContent = `${panes.length} tab(s) open`;
+            }
+
             document.getElementById('add-btn').addEventListener('click', createPane);
+            document.getElementById('sessions-btn').addEventListener('click', showSessionsModal);
             document.getElementById('close-btn').addEventListener('click', closeAllPanes);
+            document.querySelector('.close-modal-btn').addEventListener('click', hideSessionsModal);
+            document.getElementById('refresh-sessions-btn').addEventListener('click', refreshSessionsList);
+            document.getElementById('sessions-modal').addEventListener('click', (e) => {
+                if (e.target.id === 'sessions-modal') hideSessionsModal();
+            });
 
             window.addEventListener('resize', () => {
                 panes.forEach(p => p.fitAddon.fit());
