@@ -5,6 +5,10 @@
 #     "uvicorn",
 #     "websockets",
 #     "pyte",
+#     "authlib",
+#     "httpx",
+#     "itsdangerous",
+#     "python-dotenv",
 # ]
 # ///
 """
@@ -29,11 +33,25 @@ import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 
+from dotenv import load_dotenv
 import pyte
 import websockets
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.requests import Request
+from authlib.integrations.starlette_client import OAuth
+from itsdangerous import URLSafeSerializer
 from websockets.asyncio.server import ServerConnection
+
+load_dotenv()
+
+ALLOWED_EMAIL = os.environ["ALLOWED_EMAIL"]
+GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
+GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
+SESSION_SECRET = os.environ["SESSION_SECRET"]
+WS_PORT = int(os.environ["WS_PORT"])
+HTTP_PORT = int(os.environ["HTTP_PORT"])
 
 # =============================================================================
 # Protocol
@@ -479,6 +497,12 @@ class TerminalServer:
         self._pty_tasks[session_id] = task
 
     async def _handle_websocket_client(self, websocket: ServerConnection) -> None:
+        cookie_header = websocket.request.headers.get("Cookie")
+        email = get_email_from_cookie(cookie_header)
+        if email != ALLOWED_EMAIL:
+            await websocket.close(4001, "Unauthorized")
+            return
+
         client_id = self._next_client_id
         self._next_client_id += 1
         self._ws_clients[client_id] = websocket
@@ -688,10 +712,57 @@ def daemonize(pid_file_path: str) -> None:
 # =============================================================================
 
 app = FastAPI(title="Terminal")
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+
+oauth = OAuth()
+oauth.register(
+    name="google",
+    client_id=GOOGLE_CLIENT_ID,
+    client_secret=GOOGLE_CLIENT_SECRET,
+    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+    client_kwargs={"scope": "openid email"},
+)
+
+session_serializer = URLSafeSerializer(SESSION_SECRET, "cookie-session")
+
+
+def get_email_from_cookie(cookie_header: str | None) -> str | None:
+    if cookie_header is None:
+        return None
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if part.startswith("session="):
+            session_value = part[len("session="):]
+            try:
+                data = session_serializer.loads(session_value)
+                return data.get("user")
+            except Exception:
+                return None
+    return None
+
+
+@app.get("/login")
+async def login(request: Request):
+    redirect_uri = request.url_for("callback")
+    return await oauth.google.authorize_redirect(request, redirect_uri)
+
+
+@app.get("/callback")
+async def callback(request: Request):
+    token = await oauth.google.authorize_access_token(request)
+    user_info = token.get("userinfo")
+    if user_info is None:
+        raise RuntimeError("No userinfo in token response")
+    if user_info.get("email") != ALLOWED_EMAIL:
+        return HTMLResponse("Unauthorized email", status_code=403)
+    request.session["user"] = user_info["email"]
+    return RedirectResponse(url="/")
 
 
 @app.get("/", response_class=HTMLResponse)
-async def terminal_ui():
+async def terminal_ui(request: Request):
+    if request.session.get("user") != ALLOWED_EMAIL:
+        return RedirectResponse(url="/login")
     html = """
     <!DOCTYPE html>
     <html>
@@ -1369,8 +1440,6 @@ async def terminal_ui():
 # Main
 # =============================================================================
 
-WS_PORT = 8866
-HTTP_PORT = 8045
 
 
 async def run_server(socket_path: str, ws_port: int, http_port: int) -> None:

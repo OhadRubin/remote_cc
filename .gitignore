@@ -2,3 +2,4 @@
 /pty_handler.py
 /server.py
 /session.py
+.env
