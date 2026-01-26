@@ -3,7 +3,6 @@
 # dependencies = [
 #     "fastapi",
 #     "uvicorn",
-#     "websockets",
 #     "pyte",
 #     "authlib",
 #     "httpx",
@@ -35,14 +34,15 @@ from enum import IntEnum
 
 from dotenv import load_dotenv
 import pyte
-import websockets
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from authlib.integrations.starlette_client import OAuth
-from itsdangerous import URLSafeSerializer
-from websockets.asyncio.server import ServerConnection
+from itsdangerous import TimestampSigner, BadSignature
+from urllib.parse import unquote
+import base64
+import json
 
 load_dotenv()
 
@@ -50,7 +50,6 @@ ALLOWED_EMAIL = os.environ["ALLOWED_EMAIL"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 SESSION_SECRET = os.environ["SESSION_SECRET"]
-WS_PORT = int(os.environ["WS_PORT"])
 HTTP_PORT = int(os.environ["HTTP_PORT"])
 
 # =============================================================================
@@ -350,18 +349,17 @@ def get_pid_file_path() -> str:
 
 
 class TerminalServer:
-    def __init__(self, socket_path: str, ws_port: int, http_port: int) -> None:
+    def __init__(self, socket_path: str, http_port: int) -> None:
         self._socket_path = socket_path
-        self._ws_port = ws_port
         self._http_port = http_port
         self._session_manager: SessionManager = SessionManager()
-        self._ws_server: websockets.asyncio.server.Server | None = None
         self._shutdown_event: asyncio.Event = asyncio.Event()
         self._next_client_id: int = 0
-        self._ws_clients: dict[int, ServerConnection] = {}
+        self._ws_clients: dict[int, WebSocket] = {}
         self._client_dimensions: dict[int, tuple[int, int]] = {}
         self._client_sessions: dict[int, int] = {}
         self._pty_tasks: dict[int, asyncio.Task[None]] = {}
+        self.last_session_id: int | None = None
 
     async def start(self) -> None:
         socket_dir = os.path.dirname(self._socket_path)
@@ -374,12 +372,6 @@ class TerminalServer:
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
         atexit.register(self._atexit_cleanup)
 
-        self._ws_server = await websockets.serve(
-            self._handle_websocket_client,
-            "0.0.0.0",
-            self._ws_port,
-        )
-
         import uvicorn
 
         config = uvicorn.Config(app, host="0.0.0.0", port=self._http_port, log_level="warning")
@@ -389,10 +381,6 @@ class TerminalServer:
         await self._shutdown_event.wait()
 
     async def stop(self) -> None:
-        if self._ws_server is not None:
-            self._ws_server.close()
-            await self._ws_server.wait_closed()
-
         for session_id, _ in list(self._session_manager.list_sessions()):
             session = self._session_manager.find_session(session_id=session_id, name=None)
             if session:
@@ -462,7 +450,7 @@ class TerminalServer:
                 ws = self._ws_clients.get(client_id)
                 if ws:
                     try:
-                        await ws.send(output_msg.encode())
+                        await ws.send_bytes(output_msg.encode())
                     except Exception:
                         self._remove_dead_client(client_id)
 
@@ -476,7 +464,7 @@ class TerminalServer:
             ws = self._ws_clients.get(client_id)
             if ws:
                 try:
-                    await ws.send(exit_msg.encode())
+                    await ws.send_bytes(exit_msg.encode())
                 except Exception:
                     self._remove_dead_client(client_id)
 
@@ -496,12 +484,12 @@ class TerminalServer:
         task = asyncio.create_task(self._pty_forward_loop(session_id, pane_id))
         self._pty_tasks[session_id] = task
 
-    async def _handle_websocket_client(self, websocket: ServerConnection) -> None:
-        cookie_header = websocket.request.headers.get("Cookie")
-        email = get_email_from_cookie(cookie_header)
+    async def handle_websocket_client(self, websocket: WebSocket, email: str) -> None:
         if email != ALLOWED_EMAIL:
-            await websocket.close(4001, "Unauthorized")
+            await websocket.close(4001)
             return
+
+        await websocket.accept()
 
         client_id = self._next_client_id
         self._next_client_id += 1
@@ -510,13 +498,9 @@ class TerminalServer:
         buffer = b""
 
         try:
-            async for raw_message in websocket:
-                if isinstance(raw_message, str):
-                    data = raw_message.encode()
-                else:
-                    data = raw_message
-
-                buffer += data
+            while True:
+                raw_message = await websocket.receive_bytes()
+                buffer += raw_message
 
                 while True:
                     message, buffer = decode(buffer)
@@ -524,12 +508,12 @@ class TerminalServer:
                         break
                     await self._dispatch_ws_message(client_id, message, websocket)
 
-        except websockets.ConnectionClosed:
+        except WebSocketDisconnect:
             pass
         except Exception as e:
             error_msg = encode_error(str(e))
             try:
-                await websocket.send(error_msg.encode())
+                await websocket.send_bytes(error_msg.encode())
             except Exception:
                 pass
         finally:
@@ -543,7 +527,7 @@ class TerminalServer:
         self,
         client_id: int,
         message: Message,
-        websocket: ServerConnection,
+        websocket: WebSocket,
     ) -> None:
         if message.msg_type == MessageType.IDENTIFY:
             width, height = decode_identify(message.payload)
@@ -567,7 +551,7 @@ class TerminalServer:
                     created_at=session.created_at,
                     attached_count=attached_count,
                 )
-                await websocket.send(info_msg.encode())
+                await websocket.send_bytes(info_msg.encode())
 
         elif message.msg_type == MessageType.NEW_SESSION:
             name = decode_new_session(message.payload)
@@ -594,6 +578,7 @@ class TerminalServer:
             )
             self._session_manager.attach_client(session.id, client_id)
             self._client_sessions[client_id] = session.id
+            self.last_session_id = session.id
             pane = session.panes[session.active_pane_id]
             self._start_pty_forwarding(session.id, pane.id)
             attached_count = len(self._session_manager.get_attached_clients(session.id))
@@ -607,7 +592,7 @@ class TerminalServer:
                 created_at=session.created_at,
                 attached_count=attached_count,
             )
-            await websocket.send(info_msg.encode())
+            await websocket.send_bytes(info_msg.encode())
 
         elif message.msg_type == MessageType.ATTACH:
             session_id = decode_attach(message.payload)
@@ -617,13 +602,14 @@ class TerminalServer:
             pane = session.panes[session.active_pane_id]
             if pane.is_dead:
                 exit_msg = encode_shell_exited(session.id, pane.id)
-                await websocket.send(exit_msg.encode())
+                await websocket.send_bytes(exit_msg.encode())
                 return
             self._session_manager.attach_client(session.id, client_id)
+            self.last_session_id = session.id
             self._client_sessions[client_id] = session.id
             screen_data = pane.render_to_ansi()
             output_msg = encode_output(screen_data)
-            await websocket.send(output_msg.encode())
+            await websocket.send_bytes(output_msg.encode())
             self._start_pty_forwarding(session.id, pane.id)
             attached_count = len(self._session_manager.get_attached_clients(session.id))
             info_msg = encode_session_info(
@@ -636,7 +622,7 @@ class TerminalServer:
                 created_at=session.created_at,
                 attached_count=attached_count,
             )
-            await websocket.send(info_msg.encode())
+            await websocket.send_bytes(info_msg.encode())
 
         elif message.msg_type == MessageType.INPUT:
             session_id_opt: int | None = self._client_sessions.get(client_id)
@@ -674,7 +660,7 @@ class TerminalServer:
 
         else:
             error_msg = encode_error(f"Unhandled message type: {message.msg_type.name}")
-            await websocket.send(error_msg.encode())
+            await websocket.send_bytes(error_msg.encode())
 
 
 def daemonize(pid_file_path: str) -> None:
@@ -723,7 +709,9 @@ oauth.register(
     client_kwargs={"scope": "openid email"},
 )
 
-session_serializer = URLSafeSerializer(SESSION_SECRET, "cookie-session")
+session_signer = TimestampSigner(SESSION_SECRET)
+
+terminal_server: TerminalServer | None = None
 
 
 def get_email_from_cookie(cookie_header: str | None) -> str | None:
@@ -732,13 +720,48 @@ def get_email_from_cookie(cookie_header: str | None) -> str | None:
     for part in cookie_header.split(";"):
         part = part.strip()
         if part.startswith("session="):
-            session_value = part[len("session="):]
+            session_value = unquote(part[len("session="):])
             try:
-                data = session_serializer.loads(session_value)
+                unsigned = session_signer.unsign(session_value.encode("utf-8"))
+                data = json.loads(base64.b64decode(unsigned))
                 return data.get("user")
-            except Exception:
+            except (BadSignature, Exception):
                 return None
     return None
+
+
+@app.get("/api/last-session")
+async def api_last_session(request: Request):
+    if request.session.get("user") != ALLOWED_EMAIL:
+        return {"session_id": None}
+    if terminal_server is None:
+        return {"session_id": None}
+    return {"session_id": terminal_server.last_session_id}
+
+
+@app.get("/api/sessions")
+async def api_sessions(request: Request):
+    if request.session.get("user") != ALLOWED_EMAIL:
+        return {"sessions": []}
+    if terminal_server is None:
+        return {"sessions": []}
+    result = []
+    for session_id, name in terminal_server._session_manager.list_sessions():
+        session = terminal_server._session_manager.find_session(session_id=session_id, name=None)
+        if session is None:
+            continue
+        pane = session.panes[session.active_pane_id]
+        attached_count = len(terminal_server._session_manager.get_attached_clients(session_id))
+        result.append({
+            "id": session.id,
+            "name": session.name,
+            "width": pane.width,
+            "height": pane.height,
+            "pid": pane.pid,
+            "created_at": session.created_at,
+            "attached_count": attached_count,
+        })
+    return {"sessions": result}
 
 
 @app.get("/login")
@@ -757,6 +780,18 @@ async def callback(request: Request):
         return HTMLResponse("Unauthorized email", status_code=403)
     request.session["user"] = user_info["email"]
     return RedirectResponse(url="/")
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    if terminal_server is None:
+        raise RuntimeError("Terminal server not initialized")
+    cookie_header = websocket.headers.get("cookie")
+    email = get_email_from_cookie(cookie_header)
+    if email is None:
+        await websocket.close(4001)
+        return
+    await terminal_server.handle_websocket_client(websocket, email)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -947,7 +982,7 @@ async def terminal_ui(request: Request):
         <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
         <script>
-            const wsUrl = `ws://${window.location.hostname}:8866`;
+            const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
             const panes = [];
             let activePane = null;
             let tabCounter = 0;
@@ -1222,38 +1257,27 @@ async def terminal_ui(request: Request):
                 document.getElementById('sessions-modal').classList.add('hidden');
             }
 
-            function refreshSessionsList() {
+            async function refreshSessionsList() {
                 const listEl = document.getElementById('sessions-list');
                 listEl.innerHTML = '<div class="no-sessions">Loading...</div>';
 
-                const ws = new WebSocket(wsUrl);
-                ws.binaryType = 'arraybuffer';
-                const sessions = [];
-                let recvBuffer = new ArrayBuffer(0);
-
-                ws.onopen = () => {
-                    ws.send(encodeIdentify(80, 24));
-                    ws.send(encodeListSessions());
-                };
-
-                ws.onmessage = (event) => {
-                    const combined = new Uint8Array(recvBuffer.byteLength + event.data.byteLength);
-                    combined.set(new Uint8Array(recvBuffer), 0);
-                    combined.set(new Uint8Array(event.data), recvBuffer.byteLength);
-                    const { messages, remaining } = decodeMessages(combined.buffer);
-                    recvBuffer = remaining;
-
-                    for (const msg of messages) {
-                        if (msg.type === MessageType.SESSION_INFO) {
-                            sessions.push(decodeSessionInfo(msg.payload));
-                        }
-                    }
-                };
-
-                setTimeout(() => {
-                    ws.close();
+                try {
+                    const response = await fetch('/api/sessions');
+                    const data = await response.json();
+                    const sessions = data.sessions.map(s => ({
+                        sessionId: s.id,
+                        name: s.name,
+                        width: s.width,
+                        height: s.height,
+                        pid: s.pid,
+                        createdAt: s.created_at,
+                        attachedCount: s.attached_count
+                    }));
                     renderSessionsList(sessions);
-                }, 300);
+                } catch (e) {
+                    console.error('Failed to fetch sessions:', e);
+                    listEl.innerHTML = '<div class="no-sessions">Failed to load sessions.</div>';
+                }
             }
 
             function renderSessionsList(sessions) {
@@ -1429,6 +1453,25 @@ async def terminal_ui(request: Request):
                     }
                 }
             });
+
+            // Auto-reconnect to last session on page load
+            (async function init() {
+                try {
+                    const response = await fetch('/api/last-session');
+                    const data = await response.json();
+                    if (data.session_id !== null) {
+                        // Check if session still exists
+                        const sessionsResponse = await fetch('/api/sessions');
+                        const sessionsData = await sessionsResponse.json();
+                        const sessionExists = sessionsData.sessions.some(s => s.id === data.session_id);
+                        if (sessionExists) {
+                            attachToSession(data.session_id);
+                        }
+                    }
+                } catch (e) {
+                    console.error('Failed to auto-reconnect:', e);
+                }
+            })();
         </script>
     </body>
     </html>
@@ -1442,13 +1485,14 @@ async def terminal_ui(request: Request):
 
 
 
-async def run_server(socket_path: str, ws_port: int, http_port: int) -> None:
-    server = TerminalServer(socket_path=socket_path, ws_port=ws_port, http_port=http_port)
-    await server.start()
+async def run_server(socket_path: str, http_port: int) -> None:
+    global terminal_server
+    terminal_server = TerminalServer(socket_path=socket_path, http_port=http_port)
+    await terminal_server.start()
 
 
 if __name__ == "__main__":
     socket_path = get_socket_path()
     pid_file = get_pid_file_path()
     # daemonize(pid_file)
-    asyncio.run(run_server(socket_path, WS_PORT, HTTP_PORT))
+    asyncio.run(run_server(socket_path, HTTP_PORT))
