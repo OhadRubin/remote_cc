@@ -4,6 +4,8 @@ import { TerminalPanel, type TerminalPanelParams } from './components/TerminalPa
 import { SessionsSidebar } from './components/SessionsSidebar';
 import { StatusBar } from './components/StatusBar';
 import { ContextMenu, type ContextMenuOption } from './components/ContextMenu';
+import { ToastContainer } from './components/Toast';
+import { ToastProvider } from './context/ToastContext';
 import 'dockview/dist/styles/dockview.css';
 
 let panelCounter = 0;
@@ -310,41 +312,44 @@ export function App() {
   }, [updatePanelCount]);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-      <div style={{ flex: 1, position: 'relative' }}>
-        <DockviewReact
-          className="dockview-theme-dark"
-          onReady={onReady}
-          components={components}
-          prefixHeaderActionsComponent={PrefixHeaderActions}
-          leftHeaderActionsComponent={LeftHeaderActions}
-          rightHeaderActionsComponent={RightHeaderActions}
+    <ToastProvider>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+        <div style={{ flex: 1, position: 'relative' }}>
+          <DockviewReact
+            className="dockview-theme-dark"
+            onReady={onReady}
+            components={components}
+            prefixHeaderActionsComponent={PrefixHeaderActions}
+            leftHeaderActionsComponent={LeftHeaderActions}
+            rightHeaderActionsComponent={RightHeaderActions}
+          />
+          {panelCount === 0 && (
+            <div className="empty-state">
+              <button onClick={createFirstTab} className="empty-state-btn">
+                + New Tab
+              </button>
+              <button onClick={() => setSidebarOpen(true)} className="empty-state-btn">
+                Sessions
+              </button>
+            </div>
+          )}
+        </div>
+        <StatusBar panelCount={panelCount} wsConnected={panelCount > 0} />
+        <SessionsSidebar
+          isOpen={sidebarOpen}
+          onToggle={() => setSidebarOpen(!sidebarOpen)}
+          onSelectSession={attachToSession}
         />
-        {panelCount === 0 && (
-          <div className="empty-state">
-            <button onClick={createFirstTab} className="empty-state-btn">
-              + New Tab
-            </button>
-            <button onClick={() => setSidebarOpen(true)} className="empty-state-btn">
-              Sessions
-            </button>
-          </div>
+        {contextMenu && (
+          <ContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            options={getContextMenuOptions(contextMenu.panelId)}
+            onClose={() => setContextMenu(null)}
+          />
         )}
+        <ToastContainer />
       </div>
-      <StatusBar panelCount={panelCount} wsConnected={panelCount > 0} />
-      <SessionsSidebar
-        isOpen={sidebarOpen}
-        onToggle={() => setSidebarOpen(!sidebarOpen)}
-        onSelectSession={attachToSession}
-      />
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          options={getContextMenuOptions(contextMenu.panelId)}
-          onClose={() => setContextMenu(null)}
-        />
-      )}
-    </div>
+    </ToastProvider>
   );
 }

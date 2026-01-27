@@ -1,6 +1,7 @@
 import { useEffect, useCallback } from 'react';
 import type { IDockviewPanelProps } from 'dockview';
 import { useTerminalSession } from '../hooks/useTerminalSession';
+import { useToast } from '../context/ToastContext';
 import { panelSessionMap } from '../App';
 import '@xterm/xterm/css/xterm.css';
 
@@ -11,6 +12,7 @@ export interface TerminalPanelParams {
 export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
   const { api, params } = props;
   const panelId = api.id;
+  const { showToast } = useToast();
 
   const handleSessionInfo = useCallback(
     (info: { name: string; sessionId: number }) => {
@@ -30,6 +32,7 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
   const { termRef, sendResize, sessionActive } = useTerminalSession({
     sessionId: params.sessionId,
     onSessionInfo: handleSessionInfo,
+    onStatusMessage: showToast,
   });
 
   useEffect(() => {

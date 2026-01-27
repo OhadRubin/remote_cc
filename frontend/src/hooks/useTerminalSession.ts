@@ -2,6 +2,7 @@ import { useRef, useState, useEffect, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import type { SessionInfo } from '../types';
+import type { ToastType } from '../context/ToastContext';
 import {
   MessageType,
   encodeIdentify,
@@ -16,6 +17,7 @@ import {
 interface UseTerminalSessionOptions {
   sessionId?: number;
   onSessionInfo?: (info: SessionInfo) => void;
+  onStatusMessage?: (message: string, type: ToastType) => void;
 }
 
 interface UseTerminalSessionResult {
@@ -29,7 +31,7 @@ interface UseTerminalSessionResult {
 }
 
 export function useTerminalSession(options: UseTerminalSessionOptions): UseTerminalSessionResult {
-  const { sessionId, onSessionInfo } = options;
+  const { sessionId, onSessionInfo, onStatusMessage } = options;
 
   const termRef = useRef<HTMLDivElement | null>(null);
   const termInstanceRef = useRef<Terminal | null>(null);
@@ -99,9 +101,9 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
 
     ws.onopen = () => {
       if (sessionId !== undefined) {
-        term.write('\x1b[33mReconnecting to session...\x1b[0m\r\n');
+        onStatusMessage?.('Reconnecting to session...', 'warning');
       } else {
-        term.write('\x1b[33mConnecting...\x1b[0m\r\n');
+        onStatusMessage?.('Connecting...', 'info');
       }
       ws.send(encodeIdentify(term.cols, term.rows));
 
@@ -131,29 +133,29 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
           setSessionActive(true);
           onSessionInfo?.(info);
           if (sessionId !== undefined) {
-            term.write('\x1b[32mReconnected!\x1b[0m\r\n');
+            onStatusMessage?.('Reconnected!', 'success');
           } else {
-            term.write('\x1b[32mSession ready.\x1b[0m\r\n');
+            onStatusMessage?.('Session ready.', 'success');
           }
         } else if (msg.type === MessageType.ERROR) {
           const view = new DataView(msg.payload.buffer, msg.payload.byteOffset);
           const errLen = view.getUint32(0, false);
           const errText = new TextDecoder().decode(msg.payload.slice(4, 4 + errLen));
-          term.write(`\x1b[31mError: ${errText}\x1b[0m\r\n`);
+          onStatusMessage?.(`Error: ${errText}`, 'error');
         } else if (msg.type === MessageType.SHELL_EXITED) {
-          term.write('\x1b[33mShell exited\x1b[0m\r\n');
+          onStatusMessage?.('Shell exited', 'warning');
           setSessionActive(false);
         }
       }
     };
 
     ws.onclose = () => {
-      term.write('\x1b[31mDisconnected\x1b[0m\r\n');
+      onStatusMessage?.('Disconnected', 'error');
       setSessionActive(false);
     };
 
     ws.onerror = () => {
-      term.write('\x1b[31mConnection error\x1b[0m\r\n');
+      onStatusMessage?.('Connection error', 'error');
     };
 
     const dataDisposable = term.onData((data) => {
@@ -177,7 +179,7 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
       fitAddonRef.current = null;
       wsRef.current = null;
     };
-  }, [sessionId, onSessionInfo]);
+  }, [sessionId, onSessionInfo, onStatusMessage]);
 
   return {
     termRef,
