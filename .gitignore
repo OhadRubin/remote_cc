@@ -54,3 +54,4 @@ node_modules/
 frontend/dist/
 *.tsbuildinfo
 dockview-templates
+dockview-demo
