@@ -1,0 +1,178 @@
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    padding: 0;
+    background: #1a1a2e;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    color: #ccc;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+#config-panel {
+    padding: 12px 16px;
+    background: #16213e;
+    border-bottom: 1px solid #333;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+}
+
+#config-panel button {
+    background: #28a745;
+    color: #fff;
+    border: none;
+    padding: 8px 16px;
+    cursor: pointer;
+    font-family: monospace;
+    font-size: 12px;
+    border-radius: 3px;
+}
+
+#config-panel button:hover { background: #218838; }
+#config-panel button.danger { background: #dc3545; }
+#config-panel button.danger:hover { background: #c82333; }
+#config-panel .hidden { display: none; }
+
+#status {
+    padding: 6px 16px;
+    background: #0f0f23;
+    font-size: 11px;
+    color: #888;
+    border-bottom: 1px solid #333;
+}
+
+/* TODO: Replace grid layout with Dockview's DockviewReact component */
+#panes-container {
+    flex: 1;
+    display: grid;
+    gap: 2px;
+    background: #000;
+    overflow: hidden;
+}
+
+.pane {
+    background: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* TODO: Dockview provides its own tab headers with drag handles */
+.pane-header {
+    background: #16213e;
+    padding: 4px 8px;
+    font-size: 11px;
+    color: #aaa;
+    border-bottom: 1px solid #333;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.pane-header.active { background: #28a745; color: #fff; }
+
+.pane-header .close-btn {
+    background: transparent;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 4px;
+}
+
+.pane-header .close-btn:hover { color: #dc3545; }
+
+.pane-terminal {
+    flex: 1;
+    overflow: hidden;
+}
+
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+.modal.hidden { display: none; }
+
+.modal-content {
+    background: #16213e;
+    border-radius: 8px;
+    min-width: 400px;
+    max-width: 600px;
+    max-height: 80vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-header {
+    padding: 12px 16px;
+    background: #0f0f23;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: bold;
+}
+
+.close-modal-btn {
+    background: transparent;
+    border: none;
+    color: #888;
+    font-size: 20px;
+    cursor: pointer;
+}
+
+.close-modal-btn:hover { color: #dc3545; }
+
+#sessions-list {
+    padding: 12px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.session-item {
+    padding: 10px 12px;
+    background: #1a1a2e;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.session-item:hover { background: #28a745; }
+.session-item .session-name { font-weight: bold; }
+.session-item .session-meta { font-size: 11px; color: #888; }
+.session-item:hover .session-meta { color: #ccc; }
+
+.modal-footer {
+    padding: 12px 16px;
+    background: #0f0f23;
+    text-align: right;
+}
+
+.modal-footer button {
+    background: #444;
+    color: #fff;
+    border: none;
+    padding: 8px 16px;
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+.modal-footer button:hover { background: #555; }
+
+.no-sessions { color: #888; text-align: center; padding: 20px; }

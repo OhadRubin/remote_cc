@@ -700,7 +700,7 @@ def daemonize(pid_file_path: str) -> None:
 
 app = FastAPI(title="Terminal")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
-app.mount("/assets", StaticFiles(directory="."), name="assets")
+app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 oauth = OAuth()
 oauth.register(
