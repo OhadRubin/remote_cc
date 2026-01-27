@@ -1,0 +1,266 @@
+[USER]
+claude i'm the only user of @index.py, instead of storing state in localStorage, i'm interested in having a "persistant storage" across different clients.
+please do research related to this and present a plan.
+
+[THINKING]
+The user wants to move from localStorage-based state persistence to server-side persistent storage. This would allow their terminal session layout and state to persist across different browsers/devices.
+
+Let me understand what's currently stored in localStorage by looking at the frontend code.
+
+[ASSISTANT]
+I'll research what state is currently being stored in localStorage and understand the current persistence mechanism.
+
+[THINKING]
+Now let me read the relevant parts of App.tsx to understand exactly what's being persisted.
+
+[THINKING]
+Now I understand what's being stored. The localStorage is storing Dockview's layout JSON via `event.api.toJSON()`. This contains:
+1. Panel arrangement (tabs, splits)
+2. Panel IDs and their component types
+3. Panel params (sessionId for attached sessions)
+
+Let me check what the Dockview JSON structure looks like by understanding what's stored. I should also check how sessions are managed on the backend to understand the full picture.
+
+The key insight is:
+1. **Frontend localStorage currently stores**: Dockview layout JSON (panel arrangement, panel params including sessionId mappings)
+2. **Backend already stores**: Session state (PTY state, scrollback via pyte)
+
+For cross-client persistence, we need:
+1. A server-side storage mechanism for the layout state
+2. API endpoints to save/load the layout
+3. Frontend changes to use API instead of localStorage
+
+Let me think about storage options:
+1. **SQLite** - Simple file-based database, good for single-user
+2. **JSON file** - Even simpler, just dump to a file
+3. **In-memory with JSON file persistence** - Fast reads, persistent across restarts
+
+Since this is a single-user app and we want simplicity, I'll propose options. Let me create a plan.
+
+[ASSISTANT]
+Now I understand the current state. Let me create a plan for server-side persistent storage.
+
+---
+
+## Research Summary
+
+### Current State
+**Frontend localStorage stores** (lines 58, 62 in `App.tsx`):
+- Dockview layout JSON via `event.api.toJSON()` containing:
+  - Panel arrangement (tabs, splits, groups)
+  - Panel IDs and component types
+  - Panel params (including `sessionId` for attached sessions)
+
+**Backend already stores** (in-memory):
+- Terminal sessions with PTY state
+- Scrollback buffer via pyte (2000 lines history)
+- Session metadata (name, created_at, etc.)
+
+### What Needs to Change
+
+To persist layout across different clients/browsers, we need:
+
+1. **Server-side storage** for layout state
+2. **New API endpoints**: `GET /api/layout` and `PUT /api/layout`
+3. **Frontend modification**: Replace `localStorage` calls with API calls
+
+---
+
+## Plan: Server-Side Layout Persistence
+
+### Option A: JSON File Storage (Recommended)
+Simple file-based persistence - write layout JSON to a file on disk.
+
+**Pros**: Simple, no dependencies, easy to debug/inspect, survives server restarts  
+**Cons**: No versioning, single file
+
+### Option B: SQLite Database
+Store layout in a SQLite table with timestamp.
+
+**Pros**: Can store multiple layouts, history, more structured  
+**Cons**: Overkill for single-user, adds complexity
+
+---
+
+### Implementation Plan (Option A - JSON File)
+
+#### Backend Changes (`index.py`)
+
+**1. Add layout file path constant** (~line 55)
+```python
+LAYOUT_FILE = Path(__file__).parent / ".layout.json"
+```
+
+**2. Add helper functions** (~line 775)
+```python
+def load_layout() -> dict | None:
+    if LAYOUT_FILE.exists():
+        return json.loads(LAYOUT_FILE.read_text())
+    return None
+
+def save_layout(layout: dict) -> None:
+    LAYOUT_FILE.write_text(json.dumps(layout))
+```
+
+**3. Add API endpoints** (~line 852)
+```python
+@app.get("/api/layout")
+async def api_get_layout(request: Request):
+    # Auth check
+    return load_layout() or {}
+
+@app.put("/api/layout")
+async def api_save_layout(request: Request):
+    # Auth check
+    body = await request.json()
+    save_layout(body)
+    return {"success": True}
+
+@app.delete("/api/layout")
+async def api_delete_layout(request: Request):
+    # Auth check
+    if LAYOUT_FILE.exists():
+        LAYOUT_FILE.unlink()
+    return {"success": True}
+```
+
+#### Frontend Changes (`App.tsx`)
+
+**4. Replace localStorage.setItem** (line 58)
+```typescript
+// Debounced save to avoid excessive API calls
+const saveLayout = debounce(async (layout: object) => {
+  await fetch('/api/layout', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(layout),
+  });
+}, 1000);
+```
+
+**5. Replace localStorage.getItem** (line 62)
+```typescript
+const response = await fetch('/api/layout');
+const saved = await response.json();
+if (saved && Object.keys(saved).length > 0) {
+  event.api.fromJSON(saved);
+}
+```
+
+**6. Replace localStorage.removeItem** (line 48)
+```typescript
+await fetch('/api/layout', { method: 'DELETE' });
+```
+
+---
+
+### Files to Modify
+
+| File | Changes |
+|------|---------|
+| `index.py` | Add `LAYOUT_FILE`, helper functions, 3 API endpoints (~30 lines) |
+| `frontend/src/App.tsx` | Replace 3 localStorage calls with fetch calls, add debounce utility |
+
+---
+
+Shall I proceed with this implementation?
+
+[USER]
+would it allow me to modify the interface in one browser session and make the interface change in another browser session?
+
+[THINKING]
+The user is asking if the plan I proposed would allow real-time synchronization between browser sessions - i.e., if they change the layout in one browser, would another browser automatically see that change?
+
+The answer is **no** - my proposed plan only persists the layout to the server. It doesn't provide real-time synchronization. The other browser would only see the change when it:
+1. Refreshes the page (loads layout on `onReady`)
+2. Or if we add polling
+
+For real-time sync, we'd need one of:
+1. WebSocket notifications when layout changes
+2. Polling the server periodically
+3. Server-Sent Events (SSE)
+
+Let me clarify this for the user.
+
+[ASSISTANT]
+No, my proposed plan only **persists** the layout to the server. The other browser would only see changes when it:
+1. Refreshes the page (loads layout on mount)
+
+For **real-time synchronization** between browsers, we'd need an additional mechanism:
+
+### Options for Real-Time Sync
+
+**A. Polling** (simplest)
+- Frontend polls `GET /api/layout` every N seconds
+- Compare with current layout, apply if different
+- Drawback: Delay, unnecessary requests
+
+**B. WebSocket broadcast** (recommended)
+- You already have WebSocket infrastructure
+- Server broadcasts a `LAYOUT_CHANGED` message to all connected clients when layout is saved
+- Clients receive it and call `api.fromJSON()` to update
+- Instant, efficient
+
+**C. Server-Sent Events (SSE)**
+- Dedicated event stream for layout updates
+- Adds another connection type to manage
+
+---
+
+### Recommendation
+
+Since you already have WebSocket connections per terminal panel, option **B** makes sense. The implementation would add:
+
+1. **New message type**: `LAYOUT_CHANGED = 11`
+2. **Backend**: When `PUT /api/layout` is called, broadcast to all connected WebSocket clients
+3. **Frontend**: Handle `LAYOUT_CHANGED` message, call `dockviewRef.current.fromJSON(payload)`
+
+This gives you instant cross-browser layout sync without polling overhead.
+
+Do you want the plan to include real-time sync via WebSocket broadcast?
+
+[USER]
+but the SSE interface makes more sense when implemented via javascript and gui no? the websocket is for something else - to allow programatic interface for the sessions.
+
+[THINKING]
+The user is making a good architectural point. They're saying:
+
+1. WebSocket is currently used for terminal I/O (PTY data) - it's a programmatic interface for sessions
+2. SSE would be more appropriate for GUI-related notifications like layout changes
+
+This is a valid separation of concerns:
+- **WebSocket**: Bidirectional, used for terminal I/O (INPUT/OUTPUT messages)
+- **SSE**: Unidirectional server→client, perfect for "push" notifications like "layout changed"
+
+They're right that mixing layout sync messages into the terminal WebSocket would conflate two different concerns. SSE is a cleaner fit for GUI state synchronization.
+
+Let me acknowledge this and update the plan accordingly.
+
+[ASSISTANT]
+You're right - that's a cleaner separation of concerns:
+
+- **WebSocket**: Bidirectional PTY I/O for terminal sessions (programmatic)
+- **SSE**: Unidirectional server→client push for GUI state changes
+
+SSE is a better fit here because:
+1. Layout changes are server→client only (no need for bidirectional)
+2. Keeps terminal protocol clean and focused
+3. Single SSE connection can handle all GUI notifications (layout, session list updates, etc.)
+4. Native browser `EventSource` API is simpler than managing another WebSocket
+
+---
+
+### Updated Plan
+
+**Backend additions:**
+1. `GET /api/events` - SSE endpoint that streams GUI events
+2. When `PUT /api/layout` is called, push `layout_changed` event to all SSE clients
+3. Could later extend to push `session_created`, `session_deleted`, etc.
+
+**Frontend additions:**
+1. Single `EventSource` connection to `/api/events`
+2. On `layout_changed` event, reload layout via `GET /api/layout` and apply
+
+This keeps the WebSocket protocol purely for terminal I/O while SSE handles GUI synchronization.
+
+Want me to proceed with this approach?
