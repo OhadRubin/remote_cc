@@ -48,3 +48,9 @@ Thumbs.db
 # uv
 .uv/
 uv.lock
+
+# Node.js / Frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+dockview-templates

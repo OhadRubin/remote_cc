@@ -54,6 +54,34 @@ SESSION_SECRET = os.environ["SESSION_SECRET"]
 HTTP_PORT = int(os.environ["HTTP_PORT"])
 
 # =============================================================================
+# Frontend Build
+# =============================================================================
+
+import subprocess
+from pathlib import Path
+
+def ensure_frontend_built() -> None:
+    frontend_dir = Path(__file__).parent / "frontend"
+    dist_dir = frontend_dir / "dist"
+    dist_index = dist_dir / "index.html"
+
+    if not dist_index.exists():
+        print("Building frontend...")
+        subprocess.run(["npm", "install"], cwd=frontend_dir, check=True)
+        subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
+        return
+
+    src_dir = frontend_dir / "src"
+    if src_dir.exists():
+        src_files = list(src_dir.rglob("*"))
+        if src_files:
+            src_mtime = max(f.stat().st_mtime for f in src_files if f.is_file())
+            dist_mtime = dist_index.stat().st_mtime
+            if src_mtime > dist_mtime:
+                print("Frontend sources changed, rebuilding...")
+                subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
+
+# =============================================================================
 # Protocol
 # =============================================================================
 
@@ -700,7 +728,7 @@ def daemonize(pid_file_path: str) -> None:
 
 app = FastAPI(title="Terminal")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
-app.mount("/assets", StaticFiles(directory="assets"), name="assets")
+app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
 
 oauth = OAuth()
 oauth.register(
@@ -800,7 +828,7 @@ async def websocket_endpoint(websocket: WebSocket):
 async def terminal_ui(request: Request):
     if request.session.get("user") != ALLOWED_EMAIL:
         return RedirectResponse(url="/login")
-    html = open("index.html").read()
+    html = open("frontend/dist/index.html").read()
     return html
 
 
@@ -811,6 +839,7 @@ async def terminal_ui(request: Request):
 
 
 async def run_server(socket_path: str, http_port: int) -> None:
+    ensure_frontend_built()
     global terminal_server
     terminal_server = TerminalServer(socket_path=socket_path, http_port=http_port)
     await terminal_server.start()
