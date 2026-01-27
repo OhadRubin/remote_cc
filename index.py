@@ -2,7 +2,7 @@
 # /// script
 # dependencies = [
 #     "fastapi",
-#     "uvicorn",
+#     "uvicorn[standard]",
 #     "pyte",
 #     "authlib",
 #     "httpx",
@@ -22,6 +22,7 @@ Run:
     # Then open http://localhost:8045
 """
 
+import argparse
 import asyncio
 import atexit
 import fcntl
@@ -54,11 +55,28 @@ from pycrdt.store import FileYStore
 
 load_dotenv()
 
-ALLOWED_EMAIL = os.environ["ALLOWED_EMAIL"]
-GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
-GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
-SESSION_SECRET = os.environ["SESSION_SECRET"]
-HTTP_PORT = int(os.environ["HTTP_PORT"])
+LOCAL_MODE = False
+
+def load_config():
+    global ALLOWED_EMAIL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET, HTTP_PORT
+    if LOCAL_MODE:
+        ALLOWED_EMAIL = "local@localhost"
+        GOOGLE_CLIENT_ID = ""
+        GOOGLE_CLIENT_SECRET = ""
+        SESSION_SECRET = "local-dev-secret"
+        HTTP_PORT = int(os.environ.get("HTTP_PORT", "8045"))
+    else:
+        ALLOWED_EMAIL = os.environ["ALLOWED_EMAIL"]
+        GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
+        GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
+        SESSION_SECRET = os.environ["SESSION_SECRET"]
+        HTTP_PORT = int(os.environ["HTTP_PORT"])
+
+ALLOWED_EMAIL = ""
+GOOGLE_CLIENT_ID = ""
+GOOGLE_CLIENT_SECRET = ""
+SESSION_SECRET = ""
+HTTP_PORT = 8045
 
 # =============================================================================
 # Yjs Layout Sync
@@ -570,7 +588,7 @@ class TerminalServer:
         self._pty_tasks[session_id] = task
 
     async def handle_websocket_client(self, websocket: WebSocket, email: str) -> None:
-        if email != ALLOWED_EMAIL:
+        if not LOCAL_MODE and email != ALLOWED_EMAIL:
             await websocket.close(4001)
             return
 
@@ -783,30 +801,53 @@ def daemonize(pid_file_path: str) -> None:
 # =============================================================================
 
 
+yjs_task: asyncio.Task | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global yjs_server
+    global yjs_server, yjs_asgi_server, yjs_task
     LAYOUT_STORE_PATH.mkdir(parents=True, exist_ok=True)
     yjs_server = PersistentWebsocketServer()
-    async with yjs_server:
-        yield
+    yjs_asgi_server = ASGIServer(yjs_server)
+
+    async def run_yjs():
+        async with yjs_server:
+            await asyncio.Event().wait()
+
+    yjs_task = asyncio.create_task(run_yjs())
+    await asyncio.sleep(0.1)
+    yield
+    yjs_task.cancel()
+    try:
+        await yjs_task
+    except asyncio.CancelledError:
+        pass
+    yjs_asgi_server = None
     yjs_server = None
 
 
 app = FastAPI(title="Terminal", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
 
 oauth = OAuth()
-oauth.register(
-    name="google",
-    client_id=GOOGLE_CLIENT_ID,
-    client_secret=GOOGLE_CLIENT_SECRET,
-    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-    client_kwargs={"scope": "openid email"},
-)
 
-session_signer = TimestampSigner(SESSION_SECRET)
+
+def setup_auth():
+    global session_signer
+    app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+    session_signer = TimestampSigner(SESSION_SECRET)
+    if not LOCAL_MODE:
+        oauth.register(
+            name="google",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+            client_kwargs={"scope": "openid email"},
+        )
+
+
+session_signer: TimestampSigner | None = None
 
 terminal_server: TerminalServer | None = None
 
@@ -814,6 +855,8 @@ terminal_server: TerminalServer | None = None
 def get_email_from_cookie(cookie_header: str | None) -> str | None:
     if cookie_header is None:
         return None
+    if session_signer is None:
+        raise RuntimeError("session_signer not initialized - call setup_auth() first")
     for part in cookie_header.split(";"):
         part = part.strip()
         if part.startswith("session="):
@@ -830,26 +873,32 @@ def get_email_from_cookie(cookie_header: str | None) -> str | None:
 class AuthASGIMiddleware:
     """Wraps an ASGI app to require valid session cookie for WebSocket connections."""
 
-    def __init__(self, asgi_app):
-        self.asgi_app = asgi_app
+    def __init__(self, asgi_app_getter):
+        self.asgi_app_getter = asgi_app_getter
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "websocket":
+        if scope["type"] == "websocket" and not LOCAL_MODE:
             headers = dict(scope.get("headers", []))
             cookie_header = headers.get(b"cookie", b"").decode("utf-8")
             email = get_email_from_cookie(cookie_header)
             if email != ALLOWED_EMAIL:
                 await send({"type": "websocket.close", "code": 4001})
                 return
-        await self.asgi_app(scope, receive, send)
+        asgi_app = self.asgi_app_getter()
+        if asgi_app is None:
+            await send({"type": "websocket.close", "code": 1011})
+            return
+        await asgi_app(scope, receive, send)
 
 
-app.mount("/yjs", AuthASGIMiddleware(ASGIServer(lambda: yjs_server)))
+yjs_asgi_server: ASGIServer | None = None
+
+app.mount("/yjs", AuthASGIMiddleware(lambda: yjs_asgi_server))
 
 
 @app.get("/api/last-session")
 async def api_last_session(request: Request):
-    if request.session.get("user") != ALLOWED_EMAIL:
+    if not LOCAL_MODE and request.session.get("user") != ALLOWED_EMAIL:
         return {"session_id": None}
     if terminal_server is None:
         return {"session_id": None}
@@ -858,7 +907,7 @@ async def api_last_session(request: Request):
 
 @app.get("/api/sessions")
 async def api_sessions(request: Request):
-    if request.session.get("user") != ALLOWED_EMAIL:
+    if not LOCAL_MODE and request.session.get("user") != ALLOWED_EMAIL:
         return {"sessions": []}
     if terminal_server is None:
         return {"sessions": []}
@@ -883,7 +932,7 @@ async def api_sessions(request: Request):
 
 @app.delete("/api/sessions/{session_id}")
 async def api_delete_session(session_id: int, request: Request):
-    if request.session.get("user") != ALLOWED_EMAIL:
+    if not LOCAL_MODE and request.session.get("user") != ALLOWED_EMAIL:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if terminal_server is None:
         return JSONResponse({"error": "Terminal server not initialized"}, status_code=500)
@@ -896,7 +945,7 @@ async def api_delete_session(session_id: int, request: Request):
 
 @app.patch("/api/sessions/{session_id}")
 async def api_rename_session(session_id: int, request: Request):
-    if request.session.get("user") != ALLOWED_EMAIL:
+    if not LOCAL_MODE and request.session.get("user") != ALLOWED_EMAIL:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if terminal_server is None:
         return JSONResponse({"error": "Terminal server not initialized"}, status_code=500)
@@ -925,12 +974,16 @@ async def api_rename_session(session_id: int, request: Request):
 
 @app.get("/login")
 async def login(request: Request):
+    if LOCAL_MODE:
+        return RedirectResponse(url="/")
     redirect_uri = request.url_for("callback")
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
 @app.get("/callback")
 async def callback(request: Request):
+    if LOCAL_MODE:
+        return RedirectResponse(url="/")
     token = await oauth.google.authorize_access_token(request)
     user_info = token.get("userinfo")
     if user_info is None:
@@ -945,17 +998,20 @@ async def callback(request: Request):
 async def websocket_endpoint(websocket: WebSocket):
     if terminal_server is None:
         raise RuntimeError("Terminal server not initialized")
-    cookie_header = websocket.headers.get("cookie")
-    email = get_email_from_cookie(cookie_header)
-    if email is None:
-        await websocket.close(4001)
-        return
+    if LOCAL_MODE:
+        email = ALLOWED_EMAIL
+    else:
+        cookie_header = websocket.headers.get("cookie")
+        email = get_email_from_cookie(cookie_header)
+        if email is None:
+            await websocket.close(4001)
+            return
     await terminal_server.handle_websocket_client(websocket, email)
 
 
 @app.get("/", response_class=HTMLResponse)
 async def terminal_ui(request: Request):
-    if request.session.get("user") != ALLOWED_EMAIL:
+    if not LOCAL_MODE and request.session.get("user") != ALLOWED_EMAIL:
         return RedirectResponse(url="/login")
     html = open("frontend/dist/index.html").read()
     return html
@@ -969,12 +1025,23 @@ async def terminal_ui(request: Request):
 
 async def run_server(socket_path: str, http_port: int) -> None:
     ensure_frontend_built()
+    setup_auth()
     global terminal_server
     terminal_server = TerminalServer(socket_path=socket_path, http_port=http_port)
     await terminal_server.start()
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Terminal Mux server")
+    parser.add_argument("--local", action="store_true", help="Run in local mode (skip OAuth)")
+    args = parser.parse_args()
+
+    LOCAL_MODE = args.local
+    load_config()
+
+    if LOCAL_MODE:
+        print("Running in LOCAL MODE - OAuth disabled")
+
     socket_path = get_socket_path()
     pid_file = get_pid_file_path()
     # daemonize(pid_file)
