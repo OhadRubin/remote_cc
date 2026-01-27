@@ -14,35 +14,6 @@ body {
   height: 100vh;
 }
 
-.toolbar {
-  padding: 12px 16px;
-  background: #16213e;
-  border-bottom: 1px solid #333;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: center;
-}
-
-.toolbar button {
-  background: #28a745;
-  color: #fff;
-  border: none;
-  padding: 8px 16px;
-  cursor: pointer;
-  font-family: monospace;
-  font-size: 12px;
-  border-radius: 3px;
-}
-
-.toolbar button:hover { background: #218838; }
-
-.toolbar .status {
-  margin-left: auto;
-  font-size: 11px;
-  color: #888;
-}
-
 .modal-overlay {
   position: fixed;
   top: 0;
@@ -114,6 +85,349 @@ body {
 .session-item:hover .session-meta { color: #ccc; }
 
 .no-sessions { color: #888; text-align: center; padding: 20px; }
+
+/* Status Bar */
+.status-bar {
+  padding: 6px 16px;
+  background: #0f0f23;
+  border-top: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+.status-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-bar-right {
+  color: #888;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-indicator::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.status-indicator.connected {
+  color: #28a745;
+}
+
+.status-indicator.connected::before {
+  background: #28a745;
+}
+
+.status-indicator.disconnected {
+  color: #dc3545;
+}
+
+.status-indicator.disconnected::before {
+  background: #dc3545;
+}
+
+.status-separator {
+  color: #444;
+}
+
+.ws-status.ok {
+  color: #28a745;
+}
+
+.ws-status.error {
+  color: #dc3545;
+}
+
+.tab-count {
+  color: #888;
+}
+
+/* Context Menu */
+.context-menu {
+  position: fixed;
+  z-index: 2000;
+  background: #16213e;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 4px 0;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.context-menu-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: monospace;
+  color: #ccc;
+}
+
+.context-menu-item:hover {
+  background: #28a745;
+  color: #fff;
+}
+
+.context-menu-item.danger:hover {
+  background: #dc3545;
+}
+
+/* Sidebar */
+.sidebar {
+  position: fixed;
+  left: 0;
+  top: 0;
+  height: 100vh;
+  width: 280px;
+  background: #16213e;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  z-index: 1000;
+  transform: translateX(-100%);
+  transition: transform 0.2s ease;
+}
+
+.sidebar.open {
+  transform: translateX(0);
+}
+
+.sidebar-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 999;
+}
+
+.sidebar-header {
+  padding: 12px 16px;
+  background: #0f0f23;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #333;
+}
+
+.sidebar-header h3 {
+  margin: 0;
+  font-size: 14px;
+  color: #ccc;
+}
+
+.sidebar-close {
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.sidebar-close:hover {
+  color: #dc3545;
+}
+
+.sidebar-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.sidebar-message {
+  color: #888;
+  text-align: center;
+  padding: 16px;
+  font-size: 12px;
+}
+
+.sidebar-message.error {
+  color: #dc3545;
+}
+
+.sidebar-session-item {
+  padding: 10px 12px;
+  background: #1a1a2e;
+  border-radius: 4px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: background 0.15s;
+}
+
+.sidebar-session-item:hover {
+  background: #28a745;
+}
+
+.sidebar-session-item.orphaned {
+  border-left: 3px solid #f0ad4e;
+}
+
+.sidebar-session-item:hover .session-details {
+  color: #ccc;
+}
+
+.session-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.orphan-indicator {
+  color: #f0ad4e;
+  font-size: 12px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.active {
+  background: #28a745;
+}
+
+.status-dot.inactive {
+  background: #888;
+}
+
+.sidebar-session-item .session-name {
+  font-weight: bold;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-details {
+  font-size: 10px;
+  color: #888;
+  margin-top: 4px;
+}
+
+.delete-btn {
+  background: transparent;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 14px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.sidebar-session-item:hover .delete-btn {
+  opacity: 1;
+}
+
+.delete-btn:hover {
+  color: #dc3545;
+}
+
+.sidebar-footer {
+  padding: 12px;
+  border-top: 1px solid #333;
+}
+
+.settings-btn {
+  width: 100%;
+  background: transparent;
+  border: 1px solid #333;
+  color: #888;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.settings-btn:hover {
+  background: #1a1a2e;
+  color: #ccc;
+}
+
+/* Header Actions (integrated into Dockview tab bar) */
+.group-control {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  height: 100%;
+  color: var(--dv-activegroup-visiblepanel-tab-color);
+}
+
+.group-control .action {
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  font-size: 18px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.group-control .action:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.group-control .action.action-danger:hover {
+  background-color: #dc3545;
+}
+
+.group-control .action .material-symbols-outlined {
+  font-size: inherit;
+}
+
+/* Empty state (when no panels) */
+.empty-state {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  gap: 16px;
+  z-index: 10;
+}
+
+.empty-state-btn {
+  background: #28a745;
+  color: #fff;
+  border: none;
+  padding: 12px 24px;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 14px;
+  border-radius: 4px;
+}
+
+.empty-state-btn:hover {
+  background: #218838;
+}
 
 .dockview-theme-dark {
   --dv-background-color: #1a1a2e;

@@ -35,7 +35,7 @@ from enum import IntEnum
 from dotenv import load_dotenv
 import pyte
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
@@ -357,6 +357,21 @@ class SessionManager:
         if session_id not in self._attached_clients:
             raise KeyError(f"Session {session_id} not found")
         return self._attached_clients[session_id].copy()
+
+    def rename_session(self, session_id: int, new_name: str) -> Session:
+        if session_id not in self._sessions:
+            raise KeyError(f"Session {session_id} not found")
+        if new_name in self._sessions_by_name:
+            existing = self._sessions_by_name[new_name]
+            if existing.id != session_id:
+                raise ValueError(f"Session with name '{new_name}' already exists")
+        session = self._sessions[session_id]
+        old_name = session.name
+        if old_name != new_name:
+            del self._sessions_by_name[old_name]
+            session.name = new_name
+            self._sessions_by_name[new_name] = session
+        return session
 
 
 # =============================================================================
@@ -792,6 +807,48 @@ async def api_sessions(request: Request):
             "attached_count": attached_count,
         })
     return {"sessions": result}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def api_delete_session(session_id: int, request: Request):
+    if request.session.get("user") != ALLOWED_EMAIL:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if terminal_server is None:
+        return JSONResponse({"error": "Terminal server not initialized"}, status_code=500)
+    try:
+        terminal_server._session_manager.destroy_session(session_id)
+        return {"success": True}
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+
+
+@app.patch("/api/sessions/{session_id}")
+async def api_rename_session(session_id: int, request: Request):
+    if request.session.get("user") != ALLOWED_EMAIL:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if terminal_server is None:
+        return JSONResponse({"error": "Terminal server not initialized"}, status_code=500)
+    try:
+        body = await request.json()
+        new_name = body.get("name")
+        if not new_name:
+            return JSONResponse({"error": "Missing 'name' field"}, status_code=400)
+        session = terminal_server._session_manager.rename_session(session_id, new_name)
+        pane = session.panes[session.active_pane_id]
+        attached_count = len(terminal_server._session_manager.get_attached_clients(session_id))
+        return {
+            "id": session.id,
+            "name": session.name,
+            "width": pane.width,
+            "height": pane.height,
+            "pid": pane.pid,
+            "created_at": session.created_at,
+            "attached_count": attached_count,
+        }
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
 
 
 @app.get("/login")

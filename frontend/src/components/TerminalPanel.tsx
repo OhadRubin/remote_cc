@@ -1,6 +1,7 @@
 import { useEffect, useCallback } from 'react';
 import type { IDockviewPanelProps } from 'dockview';
 import { useTerminalSession } from '../hooks/useTerminalSession';
+import { panelSessionMap } from '../App';
 import '@xterm/xterm/css/xterm.css';
 
 export interface TerminalPanelParams {
@@ -9,14 +10,22 @@ export interface TerminalPanelParams {
 
 export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
   const { api, params } = props;
+  const panelId = api.id;
 
   const handleSessionInfo = useCallback(
-    (info: { name: string }) => {
+    (info: { name: string; sessionId: number }) => {
       const suffix = params.sessionId !== undefined ? ' (reconnected)' : '';
       api.setTitle(`${info.name}${suffix}`);
+      panelSessionMap.set(panelId, info.sessionId);
     },
-    [api, params.sessionId]
+    [api, params.sessionId, panelId]
   );
+
+  useEffect(() => {
+    return () => {
+      panelSessionMap.delete(panelId);
+    };
+  }, [panelId]);
 
   const { termRef, sendResize, sessionActive } = useTerminalSession({
     sessionId: params.sessionId,
