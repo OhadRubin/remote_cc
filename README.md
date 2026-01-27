@@ -4,14 +4,16 @@ A web-based terminal multiplexer with Google OAuth authentication. Access your t
 
 ## Features
 
-- Multi-tab terminal interface
-- Session persistence (sessions survive page refresh)
-- Google OAuth authentication (restrict access to your email)
-- WebSocket-based real-time terminal
+- **Dockview-powered UI** - Drag tabs to reorder, split into groups, pop out to new windows
+- **Session persistence** - Sessions survive page refresh, layout saved to localStorage
+- **Keyboard navigation** - Alt+arrows/hjkl to switch between tabs
+- **Auto-reconnect** - Automatically reconnects to last session on page load
+- **Google OAuth** - Restrict access to your email
 
 ## Prerequisites
 
 - Python 3.10+
+- Node.js 18+ (for frontend build)
 - [uv](https://github.com/astral-sh/uv) package manager
 - Google Cloud account (for OAuth)
 
@@ -44,7 +46,6 @@ GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 SESSION_SECRET=run-python-c-"import secrets; print(secrets.token_urlsafe(32))"
 ALLOWED_EMAIL=your-email@gmail.com
-WS_PORT=8866
 HTTP_PORT=8045
 ```
 
@@ -54,7 +55,21 @@ HTTP_PORT=8045
 ./index.py
 ```
 
+The server auto-builds the frontend on first run (or when sources change).
+
 Open http://localhost:8045
+
+## Development
+
+For frontend development with hot reload:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+This runs Vite dev server on port 5173 with proxy to the backend.
 
 ## Remote Access (Cloudflare Tunnel)
 
@@ -93,7 +108,11 @@ For secure remote access with a stable URL:
 | `SESSION_SECRET` | Secret for session encryption |
 | `ALLOWED_EMAIL` | Email address allowed to access |
 | `HTTP_PORT` | HTTP server port (default: 8045) |
-| `WS_PORT` | WebSocket server port (default: 8866) |
+
+## Tech Stack
+
+- **Backend**: Python/FastAPI, WebSocket binary protocol
+- **Frontend**: React, TypeScript, Vite, Dockview, xterm.js
 
 ## License
 
