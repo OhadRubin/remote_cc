@@ -8,6 +8,9 @@
 #     "httpx",
 #     "itsdangerous",
 #     "python-dotenv",
+#     "pycrdt",
+#     "pycrdt-websocket @ git+https://github.com/y-crdt/pycrdt-websocket",
+#     "pycrdt-store",
 # ]
 # ///
 """
@@ -44,6 +47,10 @@ from itsdangerous import TimestampSigner, BadSignature
 from urllib.parse import unquote
 import base64
 import json
+from contextlib import asynccontextmanager
+from pathlib import Path
+from pycrdt.websocket import ASGIServer, WebsocketServer
+from pycrdt.store import FileYStore
 
 load_dotenv()
 
@@ -54,11 +61,45 @@ SESSION_SECRET = os.environ["SESSION_SECRET"]
 HTTP_PORT = int(os.environ["HTTP_PORT"])
 
 # =============================================================================
+# Yjs Layout Sync
+# =============================================================================
+
+LAYOUT_STORE_PATH = Path(__file__).parent / ".yjs_store"
+
+
+class PersistentWebsocketServer(WebsocketServer):
+    """WebsocketServer that persists room data to disk using FileYStore."""
+
+    async def get_room(self, name: str):
+        from pycrdt.websocket.yroom import YRoom
+        from functools import partial
+
+        if name not in self.rooms.keys():
+            store_path = LAYOUT_STORE_PATH / f"{name}.ystore"
+            ystore = FileYStore(path=str(store_path))
+            provider_factory = (
+                partial(self.provider_factory, path=name)
+                if self.provider_factory is not None
+                else None
+            )
+            self.rooms[name] = YRoom(
+                ready=self.rooms_ready,
+                log=self.log,
+                ystore=ystore,
+                provider_factory=provider_factory,
+            )
+        room = self.rooms[name]
+        await self.start_room(room)
+        return room
+
+
+yjs_server: PersistentWebsocketServer | None = None
+
+# =============================================================================
 # Frontend Build
 # =============================================================================
 
 import subprocess
-from pathlib import Path
 
 def ensure_frontend_built() -> None:
     frontend_dir = Path(__file__).parent / "frontend"
@@ -741,7 +782,18 @@ def daemonize(pid_file_path: str) -> None:
 # FastAPI Web UI
 # =============================================================================
 
-app = FastAPI(title="Terminal")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global yjs_server
+    LAYOUT_STORE_PATH.mkdir(parents=True, exist_ok=True)
+    yjs_server = PersistentWebsocketServer()
+    async with yjs_server:
+        yield
+    yjs_server = None
+
+
+app = FastAPI(title="Terminal", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
 
@@ -773,6 +825,26 @@ def get_email_from_cookie(cookie_header: str | None) -> str | None:
             except (BadSignature, Exception):
                 return None
     return None
+
+
+class AuthASGIMiddleware:
+    """Wraps an ASGI app to require valid session cookie for WebSocket connections."""
+
+    def __init__(self, asgi_app):
+        self.asgi_app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            headers = dict(scope.get("headers", []))
+            cookie_header = headers.get(b"cookie", b"").decode("utf-8")
+            email = get_email_from_cookie(cookie_header)
+            if email != ALLOWED_EMAIL:
+                await send({"type": "websocket.close", "code": 4001})
+                return
+        await self.asgi_app(scope, receive, send)
+
+
+app.mount("/yjs", AuthASGIMiddleware(ASGIServer(lambda: yjs_server)))
 
 
 @app.get("/api/last-session")

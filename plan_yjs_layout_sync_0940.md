@@ -27,7 +27,8 @@ Replace localStorage-based layout persistence with Yjs CRDT sync, enabling seaml
 #     "itsdangerous",
 #     "python-dotenv",
 #     "pycrdt",
-#     "pycrdt-websocket",
+#     "pycrdt-websocket @ git+https://github.com/y-crdt/pycrdt-websocket",
+#     "pycrdt-store",
 # ]
 # ///
 ```
@@ -36,19 +37,44 @@ Replace localStorage-based layout persistence with Yjs CRDT sync, enabling seaml
 
 ```python
 from contextlib import asynccontextmanager
-from pycrdt_websocket import ASGIServer, WebsocketServer
-from pycrdt_websocket.ystore import FileYStore
+from pathlib import Path
+from pycrdt.websocket import ASGIServer, WebsocketServer
+from pycrdt.store import FileYStore
 ```
 
-### 3. Add Yjs server setup (after line 54, before line 56)
+### 3. Add Yjs server setup with persistence (after line 54, before line 56)
 
 ```python
 LAYOUT_STORE_PATH = Path(__file__).parent / ".yjs_store"
 
-class LayoutYStore(FileYStore):
-    root_path = str(LAYOUT_STORE_PATH)
 
-yjs_server: WebsocketServer | None = None
+class PersistentWebsocketServer(WebsocketServer):
+    """WebsocketServer that persists room data to disk using FileYStore."""
+
+    async def get_room(self, name: str):
+        from pycrdt.websocket.yroom import YRoom
+        from functools import partial
+
+        if name not in self.rooms.keys():
+            store_path = LAYOUT_STORE_PATH / f"{name}.ystore"
+            ystore = FileYStore(path=str(store_path))
+            provider_factory = (
+                partial(self.provider_factory, path=name)
+                if self.provider_factory is not None
+                else None
+            )
+            self.rooms[name] = YRoom(
+                ready=self.rooms_ready,
+                log=self.log,
+                ystore=ystore,
+                provider_factory=provider_factory,
+            )
+        room = self.rooms[name]
+        await self.start_room(room)
+        return room
+
+
+yjs_server: PersistentWebsocketServer | None = None
 ```
 
 ### 4. Replace FastAPI app initialization (lines 744-745)
@@ -64,7 +90,8 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global yjs_server
-    yjs_server = WebsocketServer(ystore_class=LayoutYStore)
+    LAYOUT_STORE_PATH.mkdir(parents=True, exist_ok=True)
+    yjs_server = PersistentWebsocketServer()
     async with yjs_server:
         yield
     yjs_server = None
@@ -73,12 +100,31 @@ app = FastAPI(title="Terminal", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 ```
 
-### 5. Mount Yjs ASGI server (after line 746)
+### 5. Mount Yjs ASGI server with auth middleware (after line 746)
+
+The `/yjs` endpoint uses `ASGIServer` which bypasses FastAPI's session middleware.
+We wrap it with a custom ASGI middleware that validates the session cookie before
+allowing the WebSocket connection (same cookie-based auth used by `/ws`).
 
 ```python
-# Yjs WebSocket endpoint for layout sync
-# Note: Auth handled separately since y-websocket has its own protocol
-app.mount("/yjs", ASGIServer(lambda: yjs_server))
+class AuthASGIMiddleware:
+    """Wraps an ASGI app to require valid session cookie for WebSocket connections."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            headers = dict(scope.get("headers", []))
+            cookie_header = headers.get(b"cookie", b"").decode("utf-8")
+            email = get_email_from_cookie(cookie_header)
+            if email != ALLOWED_EMAIL:
+                await send({"type": "websocket.close", "code": 4001})
+                return
+        await self.app(scope, receive, send)
+
+# Yjs WebSocket endpoint for layout sync (auth via cookie, same as /ws)
+app.mount("/yjs", AuthASGIMiddleware(ASGIServer(lambda: yjs_server)))
 ```
 
 ### 6. Add .yjs_store to .gitignore
@@ -426,37 +472,11 @@ const createFirstTab = useCallback(() => {
 
 ## Open Questions
 
-### 1. Authentication on `/yjs` endpoint
+### 1. Authentication on `/yjs` endpoint ✅ RESOLVED
 
-**Problem**: `ASGIServer` from pycrdt-websocket creates its own WebSocket handling, which bypasses FastAPI's session middleware and auth checks. Anyone who can reach `/yjs` can sync layout data.
+**Problem**: `ASGIServer` from pycrdt-websocket creates its own WebSocket handling, which bypasses FastAPI's session middleware and auth checks.
 
-**Options**:
-
-A. **Wrap ASGIServer in auth middleware** - Create custom ASGI middleware that checks cookie before passing to ASGIServer
-```python
-class AuthASGIMiddleware:
-    def __init__(self, app, allowed_email):
-        self.app = app
-        self.allowed_email = allowed_email
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "websocket":
-            email = get_email_from_cookie(scope.get("headers", []))
-            if email != self.allowed_email:
-                await send({"type": "websocket.close", "code": 4001})
-                return
-        await self.app(scope, receive, send)
-
-app.mount("/yjs", AuthASGIMiddleware(ASGIServer(lambda: yjs_server), ALLOWED_EMAIL))
-```
-
-B. **Handle WebSocket manually in FastAPI** - Don't use ASGIServer, instead create a FastAPI WebSocket endpoint that:
-   1. Checks auth (like existing `/ws` endpoint)
-   2. Manually implements Yjs sync protocol or delegates to WebsocketServer
-
-C. **Accept no auth on `/yjs`** - Since this is a single-user app and the terminal `/ws` is already protected, layout sync exposure is low risk. An attacker could only see/modify tab arrangement, not terminal content.
-
-**Recommendation**: Option A is simplest if pycrdt-websocket's ASGIServer plays nice with wrapping. Option C is acceptable for MVP given single-user context.
+**Solution**: Option A - Wrap ASGIServer with `AuthASGIMiddleware` that validates the session cookie (same cookie-based auth used by `/ws`). See "Mount Yjs ASGI server with auth middleware" section above.
 
 ---
 
@@ -485,10 +505,10 @@ C. **Server-assigned IDs** - Request panel ID from server before creating
 
 **Options**:
 
-A. **Wait for Yjs sync event** - WebsocketProvider emits `'synced'` event when initial sync completes
+A. **Wait for Yjs sync event** - WebsocketProvider emits `'sync'` event when initial sync completes
 ```typescript
-provider.on('synced', () => {
-  if (dockviewApi.panels.length === 0) {
+provider.on('sync', (isSynced: boolean) => {
+  if (isSynced && dockviewApi.panels.length === 0) {
     autoReconnectLastSession(dockviewApi);
   }
 });

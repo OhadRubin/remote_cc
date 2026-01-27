@@ -6,9 +6,12 @@ import { StatusBar } from './components/StatusBar';
 import { ContextMenu, type ContextMenuOption } from './components/ContextMenu';
 import { ToastContainer } from './components/Toast';
 import { ToastProvider } from './context/ToastContext';
+import { useLayoutSync } from './hooks/useLayoutSync';
 import 'dockview/dist/styles/dockview.css';
 
-let panelCounter = 0;
+function generatePanelId(): string {
+  return `terminal-${crypto.randomUUID().slice(0, 8)}`;
+}
 
 export const panelSessionMap = new Map<string, number>();
 
@@ -23,6 +26,7 @@ export function App() {
   const [panelCount, setPanelCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const layoutSync = useLayoutSync(dockviewRef.current);
 
   const updatePanelCount = useCallback(() => {
     if (dockviewRef.current) {
@@ -32,50 +36,36 @@ export function App() {
 
   const attachToSession = useCallback((sessionId: number) => {
     if (!dockviewRef.current) return;
-    panelCounter++;
-    const id = `terminal-${panelCounter}`;
+    const id = generatePanelId();
+    const title = `Session ${sessionId}`;
     dockviewRef.current.addPanel({
       id,
       component: 'terminal',
-      title: `Tab ${panelCounter} (reconnect)`,
+      title,
       params: { sessionId },
     });
+    layoutSync.addPanel({ id, component: 'terminal', title, params: { sessionId } });
     updatePanelCount();
-  }, [updatePanelCount]);
+  }, [updatePanelCount, layoutSync]);
 
   const closeAllPanels = useCallback(() => {
     if (!dockviewRef.current) return;
     const panels = [...dockviewRef.current.panels];
     panels.forEach((panel) => panel.api.close());
-    localStorage.removeItem('terminal-layout');
+    layoutSync.clearAllPanels();
     updatePanelCount();
-  }, [updatePanelCount]);
+  }, [updatePanelCount, layoutSync]);
 
   const onReady = useCallback((event: DockviewReadyEvent) => {
     dockviewRef.current = event.api;
 
     event.api.onDidLayoutChange(() => {
       updatePanelCount();
-      if (event.api.panels.length > 0) {
-        localStorage.setItem('terminal-layout', JSON.stringify(event.api.toJSON()));
-      }
     });
-
-    const saved = localStorage.getItem('terminal-layout');
-    if (saved) {
-      try {
-        event.api.fromJSON(JSON.parse(saved));
-        updatePanelCount();
-        return;
-      } catch (e) {
-        console.warn('Failed to restore layout:', e);
-      }
-    }
-
-    autoReconnectLastSession(event.api);
   }, [updatePanelCount]);
 
-  const autoReconnectLastSession = async (api: DockviewReadyEvent['api']) => {
+  const autoReconnectLastSession = useCallback(async () => {
+    if (!dockviewRef.current) return;
     try {
       const response = await fetch('/api/last-session');
       const data = await response.json();
@@ -86,20 +76,30 @@ export function App() {
           (s: { id: number }) => s.id === data.session_id
         );
         if (sessionExists) {
-          panelCounter++;
-          api.addPanel({
-            id: `terminal-${panelCounter}`,
+          const id = generatePanelId();
+          const title = `Session ${data.session_id}`;
+          dockviewRef.current.addPanel({
+            id,
             component: 'terminal',
-            title: `Tab ${panelCounter} (reconnect)`,
+            title,
             params: { sessionId: data.session_id },
           });
+          layoutSync.addPanel({ id, component: 'terminal', title, params: { sessionId: data.session_id } });
           updatePanelCount();
         }
       }
     } catch (e) {
       console.error('Failed to auto-reconnect:', e);
     }
-  };
+  }, [updatePanelCount, layoutSync]);
+
+  useEffect(() => {
+    if (!layoutSync.synced || !dockviewRef.current) return;
+    const syncedPanels = layoutSync.getPanels();
+    if (syncedPanels.length === 0 && dockviewRef.current.panels.length === 0) {
+      autoReconnectLastSession();
+    }
+  }, [layoutSync.synced, autoReconnectLastSession, layoutSync]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -221,9 +221,10 @@ export function App() {
     if (panel) {
       panel.api.close();
       panelSessionMap.delete(panelId);
+      layoutSync.removePanel(panelId);
       updatePanelCount();
     }
-  }, [updatePanelCount]);
+  }, [updatePanelCount, layoutSync]);
 
   const getContextMenuOptions = useCallback((panelId: string): ContextMenuOption[] => {
     return [
@@ -240,13 +241,15 @@ export function App() {
   const LeftHeaderActions = useMemo(() => {
     return function LeftHeaderActionsComponent(props: IDockviewHeaderActionsProps) {
       const onClick = () => {
-        panelCounter++;
+        const id = generatePanelId();
+        const title = 'New Tab';
         props.containerApi.addPanel({
-          id: `terminal-${panelCounter}`,
+          id,
           component: 'terminal',
-          title: `Tab ${panelCounter}`,
+          title,
           position: { referenceGroup: props.group },
         });
+        layoutSync.addPanel({ id, component: 'terminal', title });
         updatePanelCount();
       };
       return (
@@ -257,7 +260,7 @@ export function App() {
         </div>
       );
     };
-  }, [updatePanelCount]);
+  }, [updatePanelCount, layoutSync]);
 
   const PrefixHeaderActions = useMemo(() => {
     return function PrefixHeaderActionsComponent(_props: IDockviewHeaderActionsProps) {
@@ -302,14 +305,16 @@ export function App() {
 
   const createFirstTab = useCallback(() => {
     if (!dockviewRef.current) return;
-    panelCounter++;
+    const id = generatePanelId();
+    const title = 'New Tab';
     dockviewRef.current.addPanel({
-      id: `terminal-${panelCounter}`,
+      id,
       component: 'terminal',
-      title: `Tab ${panelCounter}`,
+      title,
     });
+    layoutSync.addPanel({ id, component: 'terminal', title });
     updatePanelCount();
-  }, [updatePanelCount]);
+  }, [updatePanelCount, layoutSync]);
 
   return (
     <ToastProvider>

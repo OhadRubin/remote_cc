@@ -55,3 +55,6 @@ frontend/dist/
 *.tsbuildinfo
 dockview-templates
 dockview-demo
+
+# Yjs persistence
+.yjs_store/
