@@ -1,9 +1,11 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import type { IDockviewPanelProps } from 'dockview';
 import { useTerminalSession } from '../hooks/useTerminalSession';
 import { useToast } from '../context/ToastContext';
 import { panelSessionMap } from '../App';
 import '@xterm/xterm/css/xterm.css';
+
+const SCROLL_SENSITIVITY = 20;
 
 export interface TerminalPanelParams {
   sessionId?: number;
@@ -33,12 +35,14 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
 
   const sessionName = params.sessionName ?? `panel-${panelId}`;
 
-  const { termRef, sendResize, sessionActive } = useTerminalSession({
+  const { termRef, sendResize, sendInput, sessionActive } = useTerminalSession({
     sessionId: params.sessionId,
     sessionName,
     onSessionInfo: handleSessionInfo,
     onStatusMessage: showToast,
   });
+
+  const touchScrollRef = useRef<{ y: number; accumulated: number } | null>(null);
 
   useEffect(() => {
     const container = termRef.current;
@@ -52,6 +56,59 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
     observer.observe(container);
     return () => observer.disconnect();
   }, [sendResize, panelId]);
+
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+
+    const handleViewportResize = () => sendResize();
+    viewport.addEventListener('resize', handleViewportResize);
+    return () => viewport.removeEventListener('resize', handleViewportResize);
+  }, [sendResize]);
+
+  useEffect(() => {
+    const container = termRef.current;
+    if (!container) return;
+
+    const handleTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      touchScrollRef.current = { y: e.touches[0].clientY, accumulated: 0 };
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!touchScrollRef.current || e.touches.length !== 1) return;
+
+      const deltaY = touchScrollRef.current.y - e.touches[0].clientY;
+      touchScrollRef.current.y = e.touches[0].clientY;
+      touchScrollRef.current.accumulated += deltaY;
+
+      const scrollLines = Math.trunc(touchScrollRef.current.accumulated / SCROLL_SENSITIVITY);
+      if (scrollLines !== 0) {
+        touchScrollRef.current.accumulated -= scrollLines * SCROLL_SENSITIVITY;
+        const button = scrollLines > 0 ? 65 : 64;
+        const count = Math.abs(scrollLines);
+        for (let i = 0; i < count; i++) {
+          sendInput(`\x1b[<${button};1;1M\x1b[<${button};1;1m`);
+        }
+      }
+    };
+
+    const handleTouchEnd = () => {
+      touchScrollRef.current = null;
+    };
+
+    container.addEventListener('touchstart', handleTouchStart, { passive: true });
+    container.addEventListener('touchmove', handleTouchMove, { passive: false });
+    container.addEventListener('touchend', handleTouchEnd);
+    container.addEventListener('touchcancel', handleTouchEnd);
+
+    return () => {
+      container.removeEventListener('touchstart', handleTouchStart);
+      container.removeEventListener('touchmove', handleTouchMove);
+      container.removeEventListener('touchend', handleTouchEnd);
+      container.removeEventListener('touchcancel', handleTouchEnd);
+    };
+  }, [sendInput]);
 
   useEffect(() => {
     const currentTitle = api.title || 'Terminal';

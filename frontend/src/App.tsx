@@ -1,13 +1,17 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { DockviewReact, type DockviewReadyEvent, type IDockviewPanelProps, type IDockviewHeaderActionsProps } from 'dockview';
 import { TerminalPanel, type TerminalPanelParams } from './components/TerminalPanel';
 import { SessionsSidebar } from './components/SessionsSidebar';
 import { StatusBar } from './components/StatusBar';
 import { ContextMenu, type ContextMenuOption } from './components/ContextMenu';
+import { InputModal, ConfirmModal } from './components/InputModal';
 import { ToastContainer } from './components/Toast';
 import { ToastProvider } from './context/ToastContext';
 import { useLayoutSync } from './hooks/useLayoutSync';
 import 'dockview/dist/styles/dockview.css';
+
+const LONG_PRESS_DURATION = 500;
+const SWIPE_THRESHOLD = 80;
 
 function generatePanelId(): string {
   return `terminal-${crypto.randomUUID().slice(0, 8)}`;
@@ -21,12 +25,26 @@ interface ContextMenuState {
   panelId: string;
 }
 
+interface RenameModalState {
+  panelId: string;
+  currentName: string;
+}
+
+interface ConfirmModalState {
+  panelId: string;
+}
+
 export function App() {
   const [dockviewApi, setDockviewApi] = useState<DockviewReadyEvent['api'] | null>(null);
   const [panelCount, setPanelCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [renameModal, setRenameModal] = useState<RenameModalState | null>(null);
+  const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
   const layoutSync = useLayoutSync(dockviewApi);
+
+  const longPressTimeoutRef = useRef<number | null>(null);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const updatePanelCount = useCallback(() => {
     if (dockviewApi) {
@@ -135,38 +153,140 @@ export function App() {
   }, [dockviewApi]);
 
   useEffect(() => {
+    let swipeStartX = 0;
+    let swipeStartY = 0;
+
+    const handleSwipeStart = (e: TouchEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('.dv-default-tab') || target.closest('.sidebar')) return;
+      swipeStartX = e.touches[0].clientX;
+      swipeStartY = e.touches[0].clientY;
+    };
+
+    const handleSwipeEnd = (e: TouchEvent) => {
+      if (!dockviewApi || swipeStartX === 0) return;
+
+      const dx = e.changedTouches[0].clientX - swipeStartX;
+      const dy = e.changedTouches[0].clientY - swipeStartY;
+
+      if (Math.abs(dy) > Math.abs(dx)) return;
+      if (Math.abs(dx) < SWIPE_THRESHOLD) return;
+
+      const panels = dockviewApi.panels;
+      if (panels.length <= 1) return;
+
+      const activePanel = dockviewApi.activePanel;
+      if (!activePanel) return;
+
+      const currentIndex = panels.findIndex(p => p.id === activePanel.id);
+      const newIndex = dx > 0
+        ? (currentIndex - 1 + panels.length) % panels.length
+        : (currentIndex + 1) % panels.length;
+
+      panels[newIndex].api.setActive();
+      swipeStartX = 0;
+    };
+
+    document.addEventListener('touchstart', handleSwipeStart, { passive: true });
+    document.addEventListener('touchend', handleSwipeEnd, { passive: true });
+
+    return () => {
+      document.removeEventListener('touchstart', handleSwipeStart);
+      document.removeEventListener('touchend', handleSwipeEnd);
+    };
+  }, [dockviewApi]);
+
+  useEffect(() => {
+    const getPanelFromTab = (tab: Element) => {
+      const panels = dockviewApi?.panels;
+      if (!panels) return null;
+      const tabContainer = tab.closest('.dv-tabs-container');
+      if (!tabContainer) return null;
+      const tabs = tabContainer.querySelectorAll('.dv-default-tab');
+      const tabIndex = Array.from(tabs).indexOf(tab);
+      if (tabIndex === -1 || tabIndex >= panels.length) return null;
+      return panels[tabIndex];
+    };
+
     const handleContextMenu = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       const tab = target.closest('.dv-default-tab');
       if (!tab || !dockviewApi) return;
 
       e.preventDefault();
+      const panel = getPanelFromTab(tab);
+      if (panel) {
+        setContextMenu({ x: e.clientX, y: e.clientY, panelId: panel.id });
+      }
+    };
 
-      const panels = dockviewApi.panels;
-      const tabContainer = tab.closest('.dv-tabs-container');
-      if (!tabContainer) return;
+    const handleTouchStart = (e: TouchEvent) => {
+      const target = e.target as HTMLElement;
+      const tab = target.closest('.dv-default-tab');
+      if (!tab || !dockviewApi) return;
 
-      const tabs = tabContainer.querySelectorAll('.dv-default-tab');
-      const tabIndex = Array.from(tabs).indexOf(tab);
-      if (tabIndex === -1 || tabIndex >= panels.length) return;
+      const touch = e.touches[0];
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
 
-      const panel = panels[tabIndex];
-      setContextMenu({ x: e.clientX, y: e.clientY, panelId: panel.id });
+      longPressTimeoutRef.current = window.setTimeout(() => {
+        const panel = getPanelFromTab(tab);
+        if (panel && touchStartRef.current) {
+          setContextMenu({ x: touchStartRef.current.x, y: touchStartRef.current.y, panelId: panel.id });
+        }
+        touchStartRef.current = null;
+      }, LONG_PRESS_DURATION);
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!touchStartRef.current || !longPressTimeoutRef.current) return;
+      const touch = e.touches[0];
+      const dx = Math.abs(touch.clientX - touchStartRef.current.x);
+      const dy = Math.abs(touch.clientY - touchStartRef.current.y);
+      if (dx > 10 || dy > 10) {
+        clearTimeout(longPressTimeoutRef.current);
+        longPressTimeoutRef.current = null;
+      }
+    };
+
+    const handleTouchEnd = () => {
+      if (longPressTimeoutRef.current) {
+        clearTimeout(longPressTimeoutRef.current);
+        longPressTimeoutRef.current = null;
+      }
+      touchStartRef.current = null;
     };
 
     document.addEventListener('contextmenu', handleContextMenu);
-    return () => document.removeEventListener('contextmenu', handleContextMenu);
+    document.addEventListener('touchstart', handleTouchStart, { passive: true });
+    document.addEventListener('touchmove', handleTouchMove, { passive: true });
+    document.addEventListener('touchend', handleTouchEnd);
+    document.addEventListener('touchcancel', handleTouchEnd);
+
+    return () => {
+      document.removeEventListener('contextmenu', handleContextMenu);
+      document.removeEventListener('touchstart', handleTouchStart);
+      document.removeEventListener('touchmove', handleTouchMove);
+      document.removeEventListener('touchend', handleTouchEnd);
+      document.removeEventListener('touchcancel', handleTouchEnd);
+    };
   }, [dockviewApi]);
 
-  const handleRenameTab = useCallback(async (panelId: string) => {
+  const handleRenameTab = useCallback((panelId: string) => {
     const sessionId = panelSessionMap.get(panelId);
-    if (sessionId === undefined) {
-      alert('Session not yet initialized');
-      return;
-    }
+    if (sessionId === undefined) return;
 
-    const newName = prompt('Enter new session name:');
-    if (!newName) return;
+    const panel = dockviewApi?.getPanel(panelId);
+    const currentTitle = panel?.title?.replace(/ [\u25cf\u25cb]$/, '') ?? '';
+    setRenameModal({ panelId, currentName: currentTitle });
+  }, [dockviewApi]);
+
+  const handleRenameSubmit = useCallback(async (newName: string) => {
+    if (!renameModal) return;
+    const { panelId } = renameModal;
+    const sessionId = panelSessionMap.get(panelId);
+    setRenameModal(null);
+
+    if (sessionId === undefined) return;
 
     try {
       const response = await fetch(`/api/sessions/${sessionId}`, {
@@ -175,8 +295,6 @@ export function App() {
         body: JSON.stringify({ name: newName }),
       });
       if (!response.ok) {
-        const data = await response.json();
-        alert(data.error || 'Failed to rename session');
         return;
       }
       const panel = dockviewApi?.getPanel(panelId);
@@ -187,34 +305,31 @@ export function App() {
       }
     } catch (err) {
       console.error('Failed to rename:', err);
-      alert('Failed to rename session');
     }
+  }, [renameModal, dockviewApi]);
+
+  const handleKillSession = useCallback((panelId: string) => {
+    const sessionId = panelSessionMap.get(panelId);
+    if (sessionId === undefined) return;
+    setConfirmModal({ panelId });
   }, []);
 
-  const handleKillSession = useCallback(async (panelId: string) => {
+  const handleKillConfirm = useCallback(async () => {
+    if (!confirmModal) return;
+    const { panelId } = confirmModal;
     const sessionId = panelSessionMap.get(panelId);
-    if (sessionId === undefined) {
-      alert('Session not yet initialized');
-      return;
-    }
+    setConfirmModal(null);
 
-    if (!confirm('Kill this session? The shell process will be terminated.')) {
-      return;
-    }
+    if (sessionId === undefined) return;
 
     try {
-      const response = await fetch(`/api/sessions/${sessionId}`, {
+      await fetch(`/api/sessions/${sessionId}`, {
         method: 'DELETE',
       });
-      if (!response.ok) {
-        const data = await response.json();
-        alert(data.error || 'Failed to kill session');
-      }
     } catch (err) {
       console.error('Failed to kill session:', err);
-      alert('Failed to kill session');
     }
-  }, []);
+  }, [confirmModal]);
 
   const handleCloseTab = useCallback((panelId: string) => {
     const panel = dockviewApi?.getPanel(panelId);
@@ -300,7 +415,7 @@ export function App() {
 
   return (
     <ToastProvider>
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh' }}>
         <div style={{ flex: 1, position: 'relative' }}>
           <DockviewReact
             className="dockview-theme-dark"
@@ -323,6 +438,25 @@ export function App() {
             y={contextMenu.y}
             options={getContextMenuOptions(contextMenu.panelId)}
             onClose={() => setContextMenu(null)}
+          />
+        )}
+        {renameModal && (
+          <InputModal
+            title="Rename Session"
+            placeholder="Session name"
+            defaultValue={renameModal.currentName}
+            onSubmit={handleRenameSubmit}
+            onCancel={() => setRenameModal(null)}
+          />
+        )}
+        {confirmModal && (
+          <ConfirmModal
+            title="Kill Session"
+            message="Kill this session? The shell process will be terminated."
+            confirmLabel="Kill"
+            danger
+            onConfirm={handleKillConfirm}
+            onCancel={() => setConfirmModal(null)}
           />
         )}
         <ToastContainer />

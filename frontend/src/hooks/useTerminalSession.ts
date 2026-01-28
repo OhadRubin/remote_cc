@@ -29,6 +29,7 @@ interface UseTerminalSessionResult {
   sessionInfo: SessionInfo | null;
   disconnect: () => void;
   sendResize: () => void;
+  sendInput: (data: string) => void;
 }
 
 export function useTerminalSession(options: UseTerminalSessionOptions): UseTerminalSessionResult {
@@ -61,6 +62,13 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
   const sendResize = useCallback(() => {
     const fitAddon = fitAddonRef.current;
     if (fitAddon) fitAddon.fit();
+  }, []);
+
+  const sendInput = useCallback((data: string) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(encodeInput(data));
+    }
   }, []);
 
   useEffect(() => {
@@ -196,5 +204,6 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
     sessionInfo,
     disconnect,
     sendResize,
+    sendInput,
   };
 }
