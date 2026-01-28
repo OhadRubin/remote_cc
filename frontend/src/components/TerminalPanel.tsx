@@ -44,12 +44,14 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
     const container = termRef.current;
     if (!container) return;
 
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
+      const { width, height } = entries[0].contentRect;
+      console.log(`[TerminalPanel ${panelId}] ResizeObserver: ${Math.round(width)}x${Math.round(height)}`);
       sendResize();
     });
     observer.observe(container);
     return () => observer.disconnect();
-  }, [sendResize]);
+  }, [sendResize, panelId]);
 
   useEffect(() => {
     const currentTitle = api.title || 'Terminal';
