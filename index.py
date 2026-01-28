@@ -329,8 +329,8 @@ def tmux_create_session(session_name: str, width: int, height: int) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to create tmux session: {result.stderr}")
-    _run_tmux("set-option", "-t", session_name, "aggressive-resize", "on")
-    _run_tmux("set-option", "-g", "window-size", "largest")
+    # _run_tmux("set-option", "-t", session_name, "aggressive-resize", "on")
+    # _run_tmux("set-option", "-g", "window-size", "largest")
 
 
 def tmux_kill_session(session_name: str) -> None:
