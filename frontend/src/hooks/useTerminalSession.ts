@@ -16,6 +16,7 @@ import {
 
 interface UseTerminalSessionOptions {
   sessionId?: number;
+  sessionName?: string;
   onSessionInfo?: (info: SessionInfo) => void;
   onStatusMessage?: (message: string, type: ToastType) => void;
 }
@@ -31,7 +32,7 @@ interface UseTerminalSessionResult {
 }
 
 export function useTerminalSession(options: UseTerminalSessionOptions): UseTerminalSessionResult {
-  const { sessionId, onSessionInfo, onStatusMessage } = options;
+  const { sessionId, sessionName, onSessionInfo, onStatusMessage } = options;
 
   const termRef = useRef<HTMLDivElement | null>(null);
   const termInstanceRef = useRef<Terminal | null>(null);
@@ -40,8 +41,11 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
   const recvBufferRef = useRef<ArrayBuffer>(new ArrayBuffer(0));
 
   const initialSessionIdRef = useRef(sessionId);
+  const initialSessionNameRef = useRef(sessionName);
   const onSessionInfoRef = useRef(onSessionInfo);
   const onStatusMessageRef = useRef(onStatusMessage);
+  const resizeFromServerRef = useRef(false);
+  const hasConnectedRef = useRef(false);
   onSessionInfoRef.current = onSessionInfo;
   onStatusMessageRef.current = onStatusMessage;
 
@@ -56,15 +60,9 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
   }, []);
 
   const sendResize = useCallback(() => {
-    const term = termInstanceRef.current;
-    const ws = wsRef.current;
     const fitAddon = fitAddonRef.current;
-
-    if (fitAddon && term) {
+    if (fitAddon) {
       fitAddon.fit();
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(encodeResize(term.cols, term.rows));
-      }
     }
   }, []);
 
@@ -117,8 +115,8 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
       if (sid !== undefined) {
         ws.send(encodeAttach(sid));
       } else {
-        const sessionName = `session-${Date.now().toString(36)}`;
-        ws.send(encodeNewSession(sessionName));
+        const name = initialSessionNameRef.current ?? `session-${Date.now().toString(36)}`;
+        ws.send(encodeNewSession(name));
       }
     };
 
@@ -136,13 +134,26 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
           term.write(text);
         } else if (msg.type === MessageType.SESSION_INFO) {
           const info = decodeSessionInfo(msg.payload);
+          const isInitialConnect = !hasConnectedRef.current;
+
+          console.log('[SESSION_INFO] received:', { serverWidth: info.width, serverHeight: info.height, termCols: term.cols, termRows: term.rows });
+          if (term.cols !== info.width || term.rows !== info.height) {
+            console.log('[SESSION_INFO] resizing terminal to server size');
+            resizeFromServerRef.current = true;
+            term.resize(info.width, info.height);
+            resizeFromServerRef.current = false;
+          }
+
           setSessionInfo(info);
           setSessionActive(true);
+          hasConnectedRef.current = true;
           onSessionInfoRef.current?.(info);
-          if (initialSessionIdRef.current !== undefined) {
-            onStatusMessageRef.current?.('Reconnected!', 'success');
-          } else {
-            onStatusMessageRef.current?.('Session ready.', 'success');
+          if (isInitialConnect) {
+            if (initialSessionIdRef.current !== undefined) {
+              onStatusMessageRef.current?.('Reconnected!', 'success');
+            } else {
+              onStatusMessageRef.current?.('Session ready.', 'success');
+            }
           }
         } else if (msg.type === MessageType.ERROR) {
           const view = new DataView(msg.payload.buffer, msg.payload.byteOffset);
@@ -172,7 +183,13 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
     });
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {
+      console.log('[onResize] fired:', { cols, rows, fromServer: resizeFromServerRef.current });
+      if (resizeFromServerRef.current) {
+        console.log('[onResize] skipping - resize from server');
+        return;
+      }
       if (ws.readyState === WebSocket.OPEN) {
+        console.log('[onResize] sending RESIZE to server');
         ws.send(encodeResize(cols, rows));
       }
     });

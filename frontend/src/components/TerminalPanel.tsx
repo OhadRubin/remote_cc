@@ -7,6 +7,7 @@ import '@xterm/xterm/css/xterm.css';
 
 export interface TerminalPanelParams {
   sessionId?: number;
+  sessionName?: string;
 }
 
 export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
@@ -30,18 +31,25 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
     };
   }, [panelId]);
 
+  const sessionName = params.sessionName ?? `panel-${panelId}`;
+
   const { termRef, sendResize, sessionActive } = useTerminalSession({
     sessionId: params.sessionId,
+    sessionName,
     onSessionInfo: handleSessionInfo,
     onStatusMessage: showToast,
   });
 
   useEffect(() => {
-    const disposable = api.onDidDimensionsChange(() => {
+    const container = termRef.current;
+    if (!container) return;
+
+    const observer = new ResizeObserver(() => {
       sendResize();
     });
-    return () => disposable.dispose();
-  }, [api, sendResize]);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [sendResize]);
 
   useEffect(() => {
     const currentTitle = api.title || 'Terminal';

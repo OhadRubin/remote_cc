@@ -3,7 +3,6 @@
 # dependencies = [
 #     "fastapi",
 #     "uvicorn[standard]",
-#     "pyte",
 #     "authlib",
 #     "httpx",
 #     "itsdangerous",
@@ -19,7 +18,7 @@
 # ]
 # ///
 """
-Multi-tab terminal UI with inlined txtmux server.
+Multi-tab terminal UI using tmux as backend.
 
 Run:
 ./index.py
@@ -35,14 +34,14 @@ import os
 import pty
 import signal
 import struct
+import subprocess
 import sys
 import termios
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 
 from dotenv import load_dotenv
-import pyte
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -268,27 +267,8 @@ def encode_shell_exited(session_id: int, pane_id: int) -> Message:
 
 
 # =============================================================================
-# PTY Handler
+# PTY Utilities
 # =============================================================================
-
-
-def spawn_shell(shell: str) -> tuple[int, int]:
-    master_fd, slave_fd = pty.openpty()
-    pid = os.fork()
-    if pid == 0:
-        os.close(master_fd)
-        os.setsid()
-        fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
-        os.dup2(slave_fd, 0)
-        os.dup2(slave_fd, 1)
-        os.dup2(slave_fd, 2)
-        if slave_fd > 2:
-            os.close(slave_fd)
-        os.environ["TERM"] = "xterm-256color"
-        os.execvp(shell, [shell])
-        raise RuntimeError("execvp failed")
-    os.close(slave_fd)
-    return (master_fd, pid)
 
 
 def set_pty_size(fd: int, width: int, height: int) -> None:
@@ -319,136 +299,129 @@ def close_pty(fd: int) -> None:
 
 
 # =============================================================================
-# Session Management
+# Tmux Integration
 # =============================================================================
 
 
-class Pane:
-    def __init__(self, id: int, pty_fd: int, pid: int, width: int, height: int) -> None:
-        self.id = id
-        self.pty_fd = pty_fd
-        self.pid = pid
-        self.width = width
-        self.height = height
-        self.screen: pyte.HistoryScreen = pyte.HistoryScreen(height, width, history=2000)
-        self.stream: pyte.Stream = pyte.Stream(self.screen)
-        self.is_dead: bool = False
-        self.exit_code: int | None = None
+TMUX_SOCKET_NAME = "terminal-mux"
 
-    def feed(self, data: bytes) -> None:
-        self.stream.feed(data.decode("utf-8", errors="replace"))
 
-    def resize_screen(self, width: int, height: int) -> None:
-        self.screen.resize(height, width)
+def _run_tmux(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run a tmux command with our socket name."""
+    cmd = ["tmux", "-L", TMUX_SOCKET_NAME] + list(args)
+    return subprocess.run(cmd, capture_output=True, text=True)
 
-    def render_to_ansi(self) -> bytes:
-        parts: list[bytes] = []
-        for row in self.screen.history.top:
-            line = "".join(row[col].data for col in sorted(row.keys()))
-            parts.append(line.encode("utf-8", errors="replace"))
-            parts.append(b"\r\n")
-        parts.append(b"\x1b[H")
-        for row, line in enumerate(self.screen.display):
-            parts.append(f"\x1b[{row + 1};1H".encode("utf-8"))
-            parts.append(line.encode("utf-8"))
-        cx, cy = self.screen.cursor.x, self.screen.cursor.y
-        parts.append(f"\x1b[{cy + 1};{cx + 1}H".encode("utf-8"))
-        return b"".join(parts)
+
+def tmux_session_exists(session_name: str) -> bool:
+    """Check if a tmux session exists."""
+    result = _run_tmux("has-session", "-t", session_name)
+    return result.returncode == 0
+
+
+def tmux_create_session(session_name: str, width: int, height: int) -> None:
+    """Create a new tmux session (detached)."""
+    result = _run_tmux(
+        "new-session",
+        "-d",
+        "-s", session_name,
+        "-x", str(width),
+        "-y", str(height),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to create tmux session: {result.stderr}")
+    _run_tmux("set-option", "-t", session_name, "aggressive-resize", "on")
+    _run_tmux("set-option", "-g", "window-size", "largest")
+
+
+def tmux_kill_session(session_name: str) -> None:
+    """Kill a tmux session."""
+    result = _run_tmux("kill-session", "-t", session_name)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to kill tmux session: {result.stderr}")
+
+
+def tmux_rename_session(old_name: str, new_name: str) -> None:
+    """Rename a tmux session."""
+    result = _run_tmux("rename-session", "-t", old_name, new_name)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to rename tmux session: {result.stderr}")
+
+
+def tmux_resize_window(session_name: str, width: int, height: int) -> None:
+    """Resize the active window of a tmux session."""
+    _run_tmux("resize-window", "-t", session_name, "-x", str(width), "-y", str(height))
 
 
 @dataclass
-class Session:
-    id: int
+class TmuxSessionInfo:
     name: str
-    panes: dict[int, Pane] = field(repr=False)
-    active_pane_id: int
     created_at: float
+    width: int
+    height: int
+    pid: int
 
 
-class SessionManager:
-    def __init__(self) -> None:
-        self._sessions: dict[int, Session] = {}
-        self._sessions_by_name: dict[str, Session] = {}
-        self._attached_clients: dict[int, set[int]] = {}
-        self._next_session_id: int = 0
-        self._next_pane_id: int = 0
+def tmux_list_sessions() -> list[TmuxSessionInfo]:
+    """List all tmux sessions with metadata."""
+    result = _run_tmux(
+        "list-sessions",
+        "-F", "#{session_name}\t#{session_created}\t#{window_width}\t#{window_height}\t#{pane_pid}",
+    )
+    if result.returncode != 0:
+        return []
 
-    def create_session(self, name: str, shell: str, width: int, height: int) -> Session:
-        if name in self._sessions_by_name:
-            raise ValueError(f"Session with name '{name}' already exists")
-        session_id = self._next_session_id
-        self._next_session_id += 1
-        pane_id = self._next_pane_id
-        self._next_pane_id += 1
-        pty_fd, pid = spawn_shell(shell)
-        set_pty_size(pty_fd, width, height)
-        pane = Pane(id=pane_id, pty_fd=pty_fd, pid=pid, width=width, height=height)
-        session = Session(
-            id=session_id,
-            name=name,
-            panes={pane_id: pane},
-            active_pane_id=pane_id,
-            created_at=time.time(),
-        )
-        self._sessions[session_id] = session
-        self._sessions_by_name[name] = session
-        self._attached_clients[session_id] = set()
-        return session
+    sessions = []
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 5:
+            sessions.append(TmuxSessionInfo(
+                name=parts[0],
+                created_at=float(parts[1]),
+                width=int(parts[2]),
+                height=int(parts[3]),
+                pid=int(parts[4]),
+            ))
+    return sessions
 
-    def destroy_session(self, session_id: int) -> None:
-        if session_id not in self._sessions:
-            raise KeyError(f"Session {session_id} not found")
-        session = self._sessions[session_id]
-        for pane in session.panes.values():
-            close_pty(pane.pty_fd)
-            try:
-                os.kill(pane.pid, signal.SIGTERM)
-                os.waitpid(pane.pid, os.WNOHANG)
-            except OSError:
-                pass
-        del self._sessions[session_id]
-        del self._sessions_by_name[session.name]
-        del self._attached_clients[session_id]
 
-    def find_session(self, session_id: int | None, name: str | None) -> Session | None:
-        if session_id is not None:
-            return self._sessions.get(session_id)
-        if name is not None:
-            return self._sessions_by_name.get(name)
-        raise ValueError("Must provide either session_id or name")
+def tmux_get_session(session_name: str) -> TmuxSessionInfo | None:
+    """Get info for a specific tmux session."""
+    for s in tmux_list_sessions():
+        if s.name == session_name:
+            return s
+    return None
 
-    def list_sessions(self) -> list[tuple[int, str]]:
-        return [(s.id, s.name) for s in self._sessions.values()]
 
-    def attach_client(self, session_id: int, client_id: int) -> None:
-        if session_id not in self._attached_clients:
-            raise KeyError(f"Session {session_id} not found")
-        self._attached_clients[session_id].add(client_id)
+def spawn_tmux_attach(session_name: str, width: int, height: int) -> tuple[int, int]:
+    """
+    Spawn a PTY running 'tmux attach-session -t <name>'.
+    Creates the session first if it doesn't exist.
+    Returns (master_fd, pid).
+    """
+    if not tmux_session_exists(session_name):
+        tmux_create_session(session_name, width, height)
 
-    def detach_client(self, session_id: int, client_id: int) -> None:
-        if session_id not in self._attached_clients:
-            raise KeyError(f"Session {session_id} not found")
-        self._attached_clients[session_id].discard(client_id)
+    master_fd, slave_fd = pty.openpty()
+    set_pty_size(master_fd, width, height)
 
-    def get_attached_clients(self, session_id: int) -> set[int]:
-        if session_id not in self._attached_clients:
-            raise KeyError(f"Session {session_id} not found")
-        return self._attached_clients[session_id].copy()
+    pid = os.fork()
+    if pid == 0:
+        os.close(master_fd)
+        os.setsid()
+        fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+        os.dup2(slave_fd, 0)
+        os.dup2(slave_fd, 1)
+        os.dup2(slave_fd, 2)
+        if slave_fd > 2:
+            os.close(slave_fd)
+        os.environ["TERM"] = "xterm-256color"
+        os.execvp("tmux", ["tmux", "-L", TMUX_SOCKET_NAME, "attach-session", "-t", session_name])
+        raise RuntimeError("execvp failed")
 
-    def rename_session(self, session_id: int, new_name: str) -> Session:
-        if session_id not in self._sessions:
-            raise KeyError(f"Session {session_id} not found")
-        if new_name in self._sessions_by_name:
-            existing = self._sessions_by_name[new_name]
-            if existing.id != session_id:
-                raise ValueError(f"Session with name '{new_name}' already exists")
-        session = self._sessions[session_id]
-        old_name = session.name
-        if old_name != new_name:
-            del self._sessions_by_name[old_name]
-            session.name = new_name
-            self._sessions_by_name[new_name] = session
-        return session
+    os.close(slave_fd)
+    return (master_fd, pid)
 
 
 # =============================================================================
@@ -469,18 +442,97 @@ def get_pid_file_path() -> str:
     return socket_path + ".pid"
 
 
+@dataclass
+class ClientConnection:
+    """State for a single WebSocket client's tmux attachment."""
+    session_name: str
+    pty_fd: int
+    pid: int
+    width: int
+    height: int
+
+
 class TerminalServer:
     def __init__(self, socket_path: str, http_port: int) -> None:
         self._socket_path = socket_path
         self._http_port = http_port
-        self._session_manager: SessionManager = SessionManager()
         self._shutdown_event: asyncio.Event = asyncio.Event()
         self._next_client_id: int = 0
         self._ws_clients: dict[int, WebSocket] = {}
         self._client_dimensions: dict[int, tuple[int, int]] = {}
-        self._client_sessions: dict[int, int] = {}
+        self._client_connections: dict[int, ClientConnection] = {}
         self._pty_tasks: dict[int, asyncio.Task[None]] = {}
-        self.last_session_id: int | None = None
+        self._session_name_to_id: dict[str, int] = {}
+        self._session_id_to_name: dict[int, str] = {}
+        self._next_session_id: int = 0
+        self.last_session_name: str | None = None
+        self._session_client_sizes: dict[str, dict[int, tuple[int, int]]] = {}
+        self._session_effective_size: dict[str, tuple[int, int]] = {}
+
+    def _get_or_create_session_id(self, session_name: str) -> int:
+        """Get existing session ID or create a new one for this session name."""
+        if session_name in self._session_name_to_id:
+            return self._session_name_to_id[session_name]
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._session_name_to_id[session_name] = session_id
+        self._session_id_to_name[session_id] = session_name
+        return session_id
+
+    def _sync_session_ids_from_tmux(self) -> None:
+        """Sync our ID mappings with actual tmux sessions."""
+        tmux_sessions = tmux_list_sessions()
+        current_names = {s.name for s in tmux_sessions}
+        stale_names = [n for n in self._session_name_to_id if n not in current_names]
+        for name in stale_names:
+            sid = self._session_name_to_id.pop(name, None)
+            if sid is not None:
+                self._session_id_to_name.pop(sid, None)
+        for s in tmux_sessions:
+            self._get_or_create_session_id(s.name)
+
+    def _get_session_name_by_id(self, session_id: int) -> str | None:
+        """Get session name by ID."""
+        return self._session_id_to_name.get(session_id)
+
+    def _register_client_size(self, session_name: str, client_id: int, width: int, height: int) -> None:
+        """Register a client's size for a session."""
+        if session_name not in self._session_client_sizes:
+            self._session_client_sizes[session_name] = {}
+        self._session_client_sizes[session_name][client_id] = (width, height)
+
+    def _unregister_client_size(self, session_name: str, client_id: int) -> None:
+        """Remove a client's size registration."""
+        if session_name in self._session_client_sizes:
+            self._session_client_sizes[session_name].pop(client_id, None)
+            if not self._session_client_sizes[session_name]:
+                del self._session_client_sizes[session_name]
+                self._session_effective_size.pop(session_name, None)
+
+    def _compute_smallest_size(self, session_name: str) -> tuple[int, int] | None:
+        """Compute the smallest dimensions across all clients for a session."""
+        sizes = self._session_client_sizes.get(session_name, {})
+        if not sizes:
+            return None
+        min_width = min(w for w, h in sizes.values())
+        min_height = min(h for w, h in sizes.values())
+        return (min_width, min_height)
+
+    async def _update_session_size(self, session_name: str) -> tuple[int, int] | None:
+        """Recompute effective size and resize tmux if changed. Returns effective size."""
+        new_size = self._compute_smallest_size(session_name)
+        if new_size is None:
+            return None
+
+        old_size = self._session_effective_size.get(session_name)
+        if old_size != new_size:
+            self._session_effective_size[session_name] = new_size
+            width, height = new_size
+            for cid, conn in self._client_connections.items():
+                if conn.session_name == session_name:
+                    set_pty_size(conn.pty_fd, width, height)
+
+        return new_size
 
     async def start(self) -> None:
         socket_dir = os.path.dirname(self._socket_path)
@@ -493,6 +545,8 @@ class TerminalServer:
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
         atexit.register(self._atexit_cleanup)
 
+        self._sync_session_ids_from_tmux()
+
         import uvicorn
 
         config = uvicorn.Config(app, host="0.0.0.0", port=self._http_port, log_level="info")
@@ -502,26 +556,26 @@ class TerminalServer:
         await self._shutdown_event.wait()
 
     async def stop(self) -> None:
-        for session_id, _ in list(self._session_manager.list_sessions()):
-            session = self._session_manager.find_session(session_id=session_id, name=None)
-            if session:
-                for pane in session.panes.values():
-                    try:
-                        os.kill(pane.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-
-        await asyncio.sleep(0.1)
-
         for task in self._pty_tasks.values():
             task.cancel()
         self._pty_tasks.clear()
 
-        for session_id, _ in list(self._session_manager.list_sessions()):
-            self._session_manager.destroy_session(session_id)
+        for client_id, conn in list(self._client_connections.items()):
+            try:
+                os.kill(conn.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                close_pty(conn.pty_fd)
+            except OSError:
+                pass
+        self._client_connections.clear()
 
         for ws in self._ws_clients.values():
-            await ws.close()
+            try:
+                await ws.close()
+            except Exception:
+                pass
         self._ws_clients.clear()
 
         pid_file = get_pid_file_path()
@@ -547,63 +601,58 @@ class TerminalServer:
         if os.path.exists(pid_file):
             os.unlink(pid_file)
 
-    async def _pty_forward_loop(self, session_id: int, pane_id: int) -> None:
-        session = self._session_manager._sessions.get(session_id)
-        if session is None:
-            raise RuntimeError(f"Session {session_id} not found")
-        pane = session.panes.get(pane_id)
-        if pane is None:
-            raise RuntimeError(f"Pane {pane_id} not found in session {session_id}")
+    async def _pty_forward_loop(self, client_id: int) -> None:
+        """Forward PTY output to WebSocket for a specific client."""
+        conn = self._client_connections.get(client_id)
+        if conn is None:
+            raise RuntimeError(f"No connection for client {client_id}")
+
+        ws = self._ws_clients.get(client_id)
+        if ws is None:
+            raise RuntimeError(f"No WebSocket for client {client_id}")
+
+        session_id = self._get_or_create_session_id(conn.session_name)
 
         while True:
             try:
-                data = await read_pty(pane.pty_fd, 4096)
+                data = await read_pty(conn.pty_fd, 4096)
             except OSError:
                 break
             if not data:
                 break
 
-            pane.feed(data)
-
             output_msg = encode_output(data)
-            client_ids = self._session_manager.get_attached_clients(session_id)
-            for client_id in client_ids:
-                ws = self._ws_clients.get(client_id)
-                if ws:
-                    try:
-                        await ws.send_bytes(output_msg.encode())
-                    except Exception:
-                        self._remove_dead_client(client_id)
-
-        pane.is_dead = True
-        await self._broadcast_shell_exited(session_id, pane_id)
-
-    async def _broadcast_shell_exited(self, session_id: int, pane_id: int) -> None:
-        client_ids = self._session_manager.get_attached_clients(session_id)
-        exit_msg = encode_shell_exited(session_id, pane_id)
-        for client_id in client_ids:
-            ws = self._ws_clients.get(client_id)
-            if ws:
-                try:
-                    await ws.send_bytes(exit_msg.encode())
-                except Exception:
-                    self._remove_dead_client(client_id)
-
-    def _remove_dead_client(self, client_id: int) -> None:
-        session_id = self._client_sessions.pop(client_id, None)
-        if session_id is not None:
             try:
-                self._session_manager.detach_client(session_id, client_id)
-            except KeyError:
+                await ws.send_bytes(output_msg.encode())
+            except Exception:
+                break
+
+        exit_msg = encode_shell_exited(session_id, 0)
+        try:
+            await ws.send_bytes(exit_msg.encode())
+        except Exception:
+            pass
+
+    def _cleanup_client(self, client_id: int) -> None:
+        """Clean up client state."""
+        conn = self._client_connections.pop(client_id, None)
+        if conn is not None:
+            self._unregister_client_size(conn.session_name, client_id)
+            try:
+                os.kill(conn.pid, signal.SIGTERM)
+            except OSError:
                 pass
+            try:
+                close_pty(conn.pty_fd)
+            except OSError:
+                pass
+
+        task = self._pty_tasks.pop(client_id, None)
+        if task is not None:
+            task.cancel()
+
         self._ws_clients.pop(client_id, None)
         self._client_dimensions.pop(client_id, None)
-
-    def _start_pty_forwarding(self, session_id: int, pane_id: int) -> None:
-        if session_id in self._pty_tasks:
-            return
-        task = asyncio.create_task(self._pty_forward_loop(session_id, pane_id))
-        self._pty_tasks[session_id] = task
 
     async def handle_websocket_client(self, websocket: WebSocket, email: str) -> None:
         if not LOCAL_MODE and email != ALLOWED_EMAIL:
@@ -638,11 +687,63 @@ class TerminalServer:
             except Exception:
                 pass
         finally:
-            session_id = self._client_sessions.pop(client_id, None)
-            if session_id is not None:
-                self._session_manager.detach_client(session_id, client_id)
-            self._ws_clients.pop(client_id, None)
-            self._client_dimensions.pop(client_id, None)
+            self._cleanup_client(client_id)
+
+    def _count_attached_clients(self, session_name: str) -> int:
+        """Count how many clients are attached to a session."""
+        count = 0
+        for conn in self._client_connections.values():
+            if conn.session_name == session_name:
+                count += 1
+        return count
+
+    async def _attach_to_session(
+        self,
+        client_id: int,
+        session_name: str,
+        width: int,
+        height: int,
+        websocket: WebSocket,
+    ) -> None:
+        """Attach a client to a tmux session (creates if needed)."""
+        self._register_client_size(session_name, client_id, width, height)
+        effective_size = await self._update_session_size(session_name)
+        eff_width, eff_height = effective_size if effective_size else (width, height)
+
+        pty_fd, pid = spawn_tmux_attach(session_name, eff_width, eff_height)
+
+        conn = ClientConnection(
+            session_name=session_name,
+            pty_fd=pty_fd,
+            pid=pid,
+            width=width,
+            height=height,
+        )
+        self._client_connections[client_id] = conn
+
+        task = asyncio.create_task(self._pty_forward_loop(client_id))
+        self._pty_tasks[client_id] = task
+
+        self.last_session_name = session_name
+        session_id = self._get_or_create_session_id(session_name)
+
+        tmux_info = tmux_get_session(session_name)
+        created_at = tmux_info.created_at if tmux_info else time.time()
+        tmux_pid = tmux_info.pid if tmux_info else pid
+
+        attached_count = self._count_attached_clients(session_name)
+
+        info_msg = encode_session_info(
+            session_id=session_id,
+            name=session_name,
+            pane_id=0,
+            pid=tmux_pid,
+            width=eff_width,
+            height=eff_height,
+            created_at=created_at,
+            attached_count=attached_count,
+        )
+        await websocket.send_bytes(info_msg.encode())
 
     async def _dispatch_ws_message(
         self,
@@ -655,21 +756,18 @@ class TerminalServer:
             self._client_dimensions[client_id] = (width, height)
 
         elif message.msg_type == MessageType.LIST_SESSIONS:
-            sessions = self._session_manager.list_sessions()
-            for session_id, name in sessions:
-                session = self._session_manager.find_session(session_id=session_id, name=None)
-                if session is None:
-                    raise RuntimeError(f"Session {session_id} not found")
-                pane = session.panes[session.active_pane_id]
-                attached_count = len(self._session_manager.get_attached_clients(session_id))
+            self._sync_session_ids_from_tmux()
+            for tmux_sess in tmux_list_sessions():
+                session_id = self._get_or_create_session_id(tmux_sess.name)
+                attached_count = self._count_attached_clients(tmux_sess.name)
                 info_msg = encode_session_info(
-                    session_id=session.id,
-                    name=session.name,
-                    pane_id=pane.id,
-                    pid=pane.pid,
-                    width=pane.width,
-                    height=pane.height,
-                    created_at=session.created_at,
+                    session_id=session_id,
+                    name=tmux_sess.name,
+                    pane_id=0,
+                    pid=tmux_sess.pid,
+                    width=tmux_sess.width,
+                    height=tmux_sess.height,
+                    created_at=tmux_sess.created_at,
                     attached_count=attached_count,
                 )
                 await websocket.send_bytes(info_msg.encode())
@@ -677,107 +775,80 @@ class TerminalServer:
         elif message.msg_type == MessageType.NEW_SESSION:
             name = decode_new_session(message.payload)
             if not name:
-                existing = self._session_manager.list_sessions()
+                existing = tmux_list_sessions()
                 if not existing:
                     name = "main"
                 else:
-                    existing_names = {n for _, n in existing}
+                    existing_names = {s.name for s in existing}
                     i = 1
                     while f"session-{i}" in existing_names:
                         i += 1
                     name = f"session-{i}"
+
             dimensions = self._client_dimensions.get(client_id)
             if dimensions is None:
                 raise RuntimeError("Client must send IDENTIFY before NEW_SESSION")
             width, height = dimensions
-            shell = os.environ.get("SHELL", "/bin/sh")
-            session = self._session_manager.create_session(
-                name=name,
-                shell=shell,
-                width=width,
-                height=height,
-            )
-            self._session_manager.attach_client(session.id, client_id)
-            self._client_sessions[client_id] = session.id
-            self.last_session_id = session.id
-            pane = session.panes[session.active_pane_id]
-            self._start_pty_forwarding(session.id, pane.id)
-            attached_count = len(self._session_manager.get_attached_clients(session.id))
-            info_msg = encode_session_info(
-                session_id=session.id,
-                name=session.name,
-                pane_id=pane.id,
-                pid=pane.pid,
-                width=pane.width,
-                height=pane.height,
-                created_at=session.created_at,
-                attached_count=attached_count,
-            )
-            await websocket.send_bytes(info_msg.encode())
+
+            await self._attach_to_session(client_id, name, width, height, websocket)
 
         elif message.msg_type == MessageType.ATTACH:
             session_id = decode_attach(message.payload)
-            session = self._session_manager.find_session(session_id=session_id, name=None)
-            if session is None:
-                raise RuntimeError(f"Session {session_id} not found")
-            pane = session.panes[session.active_pane_id]
-            if pane.is_dead:
-                exit_msg = encode_shell_exited(session.id, pane.id)
-                await websocket.send_bytes(exit_msg.encode())
-                return
-            self._session_manager.attach_client(session.id, client_id)
-            self.last_session_id = session.id
-            self._client_sessions[client_id] = session.id
-            screen_data = pane.render_to_ansi()
-            output_msg = encode_output(screen_data)
-            await websocket.send_bytes(output_msg.encode())
-            self._start_pty_forwarding(session.id, pane.id)
-            attached_count = len(self._session_manager.get_attached_clients(session.id))
+            self._sync_session_ids_from_tmux()
+            session_name = self._get_session_name_by_id(session_id)
+            if session_name is None:
+                raise RuntimeError(f"Session ID {session_id} not found")
+
+            if not tmux_session_exists(session_name):
+                raise RuntimeError(f"Tmux session '{session_name}' no longer exists")
+
+            dimensions = self._client_dimensions.get(client_id)
+            if dimensions is None:
+                raise RuntimeError("Client must send IDENTIFY before ATTACH")
+            width, height = dimensions
+
+            await self._attach_to_session(client_id, session_name, width, height, websocket)
+
+        elif message.msg_type == MessageType.INPUT:
+            conn = self._client_connections.get(client_id)
+            if conn is None:
+                raise RuntimeError("Client not attached to any session")
+            data = decode_input(message.payload)
+            write_pty(conn.pty_fd, data)
+
+        elif message.msg_type == MessageType.RESIZE:
+            conn = self._client_connections.get(client_id)
+            if conn is None:
+                raise RuntimeError("Client not attached to any session")
+            width, height = decode_resize(message.payload)
+            conn.width = width
+            conn.height = height
+
+            self._register_client_size(conn.session_name, client_id, width, height)
+            effective_size = await self._update_session_size(conn.session_name)
+            eff_width, eff_height = effective_size if effective_size else (width, height)
+
+            session_id = self._get_or_create_session_id(conn.session_name)
+            tmux_info = tmux_get_session(conn.session_name)
+            created_at = tmux_info.created_at if tmux_info else time.time()
+            tmux_pid = tmux_info.pid if tmux_info else conn.pid
+            attached_count = self._count_attached_clients(conn.session_name)
+
             info_msg = encode_session_info(
-                session_id=session.id,
-                name=session.name,
-                pane_id=pane.id,
-                pid=pane.pid,
-                width=pane.width,
-                height=pane.height,
-                created_at=session.created_at,
+                session_id=session_id,
+                name=conn.session_name,
+                pane_id=0,
+                pid=tmux_pid,
+                width=eff_width,
+                height=eff_height,
+                created_at=created_at,
                 attached_count=attached_count,
             )
             await websocket.send_bytes(info_msg.encode())
 
-        elif message.msg_type == MessageType.INPUT:
-            session_id_opt: int | None = self._client_sessions.get(client_id)
-            if session_id_opt is None:
-                raise RuntimeError("Client not attached to any session")
-            session_id = session_id_opt
-            session = self._session_manager.find_session(session_id=session_id, name=None)
-            if session is None:
-                raise RuntimeError(f"Session {session_id} not found")
-            pane = session.panes[session.active_pane_id]
-            data = decode_input(message.payload)
-            write_pty(pane.pty_fd, data)
-
-        elif message.msg_type == MessageType.RESIZE:
-            session_id_opt = self._client_sessions.get(client_id)
-            if session_id_opt is None:
-                raise RuntimeError("Client not attached to any session")
-            session_id = session_id_opt
-            session = self._session_manager.find_session(session_id=session_id, name=None)
-            if session is None:
-                raise RuntimeError(f"Session {session_id} not found")
-            pane = session.panes[session.active_pane_id]
-            width, height = decode_resize(message.payload)
-            pane.width = width
-            pane.height = height
-            set_pty_size(pane.pty_fd, width, height)
-            pane.resize_screen(width, height)
-
         elif message.msg_type == MessageType.DETACH:
-            session_id_opt = self._client_sessions.get(client_id)
-            if session_id_opt is not None:
-                session_id = session_id_opt
-                self._session_manager.detach_client(session_id, client_id)
-                del self._client_sessions[client_id]
+            self._cleanup_client(client_id)
+            self._ws_clients[client_id] = websocket
 
         else:
             error_msg = encode_error(f"Unhandled message type: {message.msg_type.name}")
@@ -916,7 +987,10 @@ async def api_last_session(request: Request):
         return {"session_id": None}
     if terminal_server is None:
         return {"session_id": None}
-    return {"session_id": terminal_server.last_session_id}
+    if terminal_server.last_session_name is None:
+        return {"session_id": None}
+    session_id = terminal_server._get_or_create_session_id(terminal_server.last_session_name)
+    return {"session_id": session_id}
 
 
 @app.get("/api/sessions")
@@ -925,20 +999,19 @@ async def api_sessions(request: Request):
         return {"sessions": []}
     if terminal_server is None:
         return {"sessions": []}
+
+    terminal_server._sync_session_ids_from_tmux()
     result = []
-    for session_id, name in terminal_server._session_manager.list_sessions():
-        session = terminal_server._session_manager.find_session(session_id=session_id, name=None)
-        if session is None:
-            continue
-        pane = session.panes[session.active_pane_id]
-        attached_count = len(terminal_server._session_manager.get_attached_clients(session_id))
+    for tmux_sess in tmux_list_sessions():
+        session_id = terminal_server._get_or_create_session_id(tmux_sess.name)
+        attached_count = terminal_server._count_attached_clients(tmux_sess.name)
         result.append({
-            "id": session.id,
-            "name": session.name,
-            "width": pane.width,
-            "height": pane.height,
-            "pid": pane.pid,
-            "created_at": session.created_at,
+            "id": session_id,
+            "name": tmux_sess.name,
+            "width": tmux_sess.width,
+            "height": tmux_sess.height,
+            "pid": tmux_sess.pid,
+            "created_at": tmux_sess.created_at,
             "attached_count": attached_count,
         })
     return {"sessions": result}
@@ -950,11 +1023,19 @@ async def api_delete_session(session_id: int, request: Request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if terminal_server is None:
         return JSONResponse({"error": "Terminal server not initialized"}, status_code=500)
+
+    terminal_server._sync_session_ids_from_tmux()
+    session_name = terminal_server._get_session_name_by_id(session_id)
+    if session_name is None:
+        return JSONResponse({"error": f"Session {session_id} not found"}, status_code=404)
+
     try:
-        terminal_server._session_manager.destroy_session(session_id)
+        tmux_kill_session(session_name)
+        terminal_server._session_name_to_id.pop(session_name, None)
+        terminal_server._session_id_to_name.pop(session_id, None)
         return {"success": True}
-    except KeyError as e:
-        return JSONResponse({"error": str(e)}, status_code=404)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.patch("/api/sessions/{session_id}")
@@ -963,27 +1044,47 @@ async def api_rename_session(session_id: int, request: Request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if terminal_server is None:
         return JSONResponse({"error": "Terminal server not initialized"}, status_code=500)
+
+    terminal_server._sync_session_ids_from_tmux()
+    session_name = terminal_server._get_session_name_by_id(session_id)
+    if session_name is None:
+        return JSONResponse({"error": f"Session {session_id} not found"}, status_code=404)
+
     try:
         body = await request.json()
         new_name = body.get("name")
         if not new_name:
             return JSONResponse({"error": "Missing 'name' field"}, status_code=400)
-        session = terminal_server._session_manager.rename_session(session_id, new_name)
-        pane = session.panes[session.active_pane_id]
-        attached_count = len(terminal_server._session_manager.get_attached_clients(session_id))
+
+        if new_name in terminal_server._session_name_to_id:
+            return JSONResponse({"error": f"Session '{new_name}' already exists"}, status_code=409)
+
+        tmux_rename_session(session_name, new_name)
+
+        terminal_server._session_name_to_id.pop(session_name, None)
+        terminal_server._session_name_to_id[new_name] = session_id
+        terminal_server._session_id_to_name[session_id] = new_name
+
+        for conn in terminal_server._client_connections.values():
+            if conn.session_name == session_name:
+                conn.session_name = new_name
+
+        tmux_info = tmux_get_session(new_name)
+        if tmux_info is None:
+            raise RuntimeError("Session not found after rename")
+
+        attached_count = terminal_server._count_attached_clients(new_name)
         return {
-            "id": session.id,
-            "name": session.name,
-            "width": pane.width,
-            "height": pane.height,
-            "pid": pane.pid,
-            "created_at": session.created_at,
+            "id": session_id,
+            "name": new_name,
+            "width": tmux_info.width,
+            "height": tmux_info.height,
+            "pid": tmux_info.pid,
+            "created_at": tmux_info.created_at,
             "attached_count": attached_count,
         }
-    except KeyError as e:
-        return JSONResponse({"error": str(e)}, status_code=404)
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=409)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/login")
