@@ -49,6 +49,7 @@ React + TypeScript + Vite application:
 
 - **App.tsx**: Root component with Dockview layout manager, keyboard nav (Alt+arrows/hjkl), layout persistence, header actions integrated into tab bar
 - **hooks/useTerminalSession.ts**: Core hook managing xterm.js terminal and WebSocket connection per panel
+- **hooks/useLayoutSync.ts**: Yjs-based real-time layout synchronization across browser tabs/windows
 - **protocol.ts**: Binary protocol encode/decode functions (mirrors backend)
 - **components/**:
   - `TerminalPanel.tsx` - Dockview panel wrapper for xterm.js terminal
@@ -72,6 +73,18 @@ IDENTIFY=0, NEW_SESSION=1, ATTACH=2, DETACH=3, LIST_SESSIONS=4,
 RESIZE=5, INPUT=6, OUTPUT=7, ERROR=8, SESSION_INFO=9, SHELL_EXITED=10
 ```
 
+### Layout Synchronization (Yjs)
+
+Real-time layout sync across browser tabs using Yjs CRDT:
+
+- **WebSocket endpoint**: `/yjs` - y-websocket provider connection
+- **State storage**: Dockview's `toJSON()` serialization stored in Y.Map
+- **Sync mechanism**:
+  1. Local changes → serialize via `toJSON()` → save to Yjs
+  2. Remote changes → apply via `fromJSON()` with `{ reuseExistingPanels: true }`
+- **Echo prevention**: `lastSavedRef` tracks last saved/applied state to prevent loops
+- **Panel preservation**: `reuseExistingPanels` option keeps existing terminal connections alive during layout updates
+
 ## Configuration
 
 Environment variables in `.env` (copy from `.env.example`):
@@ -92,4 +105,4 @@ Environment variables in `.env` (copy from `.env.example`):
 ## Key Dependencies
 
 - **Backend**: FastAPI, uvicorn, pyte (terminal emulation), authlib (OAuth)
-- **Frontend**: React 19, Dockview (tab/split UI), xterm.js (terminal rendering), Material Symbols (icons)
+- **Frontend**: React 19, Dockview (tab/split UI), xterm.js (terminal rendering), Yjs + y-websocket (layout sync), Material Symbols (icons)
