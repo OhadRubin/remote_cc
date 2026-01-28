@@ -3,6 +3,13 @@ import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import type { DockviewApi } from 'dockview';
 
+const scaleSizes = (node: any, scale: number, altScale: number): any => {
+  const result = { ...node };
+  if (typeof result.size === 'number') result.size = Math.round(result.size * scale);
+  if (Array.isArray(result.data)) result.data = result.data.map((n: any) => scaleSizes(n, altScale, scale));
+  return result;
+};
+
 export function useLayoutSync(dockviewApi: DockviewApi | null) {
   const ydocRef = useRef<Y.Doc | null>(null);
   const providerRef = useRef<WebsocketProvider | null>(null);
@@ -39,7 +46,12 @@ export function useLayoutSync(dockviewApi: DockviewApi | null) {
 
       lastSavedRef.current = data;
       try {
-        dockviewApi.fromJSON(JSON.parse(data), { reuseExistingPanels: true });
+        const parsed = JSON.parse(data);
+        const scaleW = dockviewApi.width / parsed.grid.width;
+        const scaleH = dockviewApi.height / parsed.grid.height;
+        const isHoriz = parsed.grid.orientation === 'HORIZONTAL';
+        const grid = { ...parsed.grid, width: dockviewApi.width, height: dockviewApi.height, root: scaleSizes(parsed.grid.root, isHoriz ? scaleH : scaleW, isHoriz ? scaleW : scaleH) };
+        dockviewApi.fromJSON({ ...parsed, grid }, { reuseExistingPanels: true });
       } catch (e) {
         console.error('Failed to apply layout:', e);
       }

@@ -44,7 +44,6 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
   const initialSessionNameRef = useRef(sessionName);
   const onSessionInfoRef = useRef(onSessionInfo);
   const onStatusMessageRef = useRef(onStatusMessage);
-  const resizeFromServerRef = useRef(false);
   const hasConnectedRef = useRef(false);
   onSessionInfoRef.current = onSessionInfo;
   onStatusMessageRef.current = onStatusMessage;
@@ -61,9 +60,7 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
 
   const sendResize = useCallback(() => {
     const fitAddon = fitAddonRef.current;
-    if (fitAddon) {
-      fitAddon.fit();
-    }
+    if (fitAddon) fitAddon.fit();
   }, []);
 
   useEffect(() => {
@@ -136,14 +133,6 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
           const info = decodeSessionInfo(msg.payload);
           const isInitialConnect = !hasConnectedRef.current;
 
-          console.log('[SESSION_INFO] received:', { serverWidth: info.width, serverHeight: info.height, termCols: term.cols, termRows: term.rows });
-          if (term.cols !== info.width || term.rows !== info.height) {
-            console.log('[SESSION_INFO] resizing terminal to server size');
-            resizeFromServerRef.current = true;
-            term.resize(info.width, info.height);
-            resizeFromServerRef.current = false;
-          }
-
           setSessionInfo(info);
           setSessionActive(true);
           hasConnectedRef.current = true;
@@ -183,13 +172,7 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
     });
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {
-      console.log('[onResize] fired:', { cols, rows, fromServer: resizeFromServerRef.current });
-      if (resizeFromServerRef.current) {
-        console.log('[onResize] skipping - resize from server');
-        return;
-      }
       if (ws.readyState === WebSocket.OPEN) {
-        console.log('[onResize] sending RESIZE to server');
         ws.send(encodeResize(cols, rows));
       }
     });

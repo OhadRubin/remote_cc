@@ -518,8 +518,12 @@ class TerminalServer:
         min_height = min(h for w, h in sizes.values())
         return (min_width, min_height)
 
-    async def _update_session_size(self, session_name: str) -> tuple[int, int] | None:
-        """Recompute effective size and resize tmux if changed. Returns effective size."""
+    async def _update_session_size(self, session_name: str, triggering_client_id: int | None) -> tuple[int, int] | None:
+        """Recompute effective size. Returns effective size.
+
+        Fix 2: Broadcasts SESSION_INFO to all clients when effective size changes.
+        Fix 3: Does NOT set PTY sizes - each client's PTY stays at their own size.
+        """
         new_size = self._compute_smallest_size(session_name)
         if new_size is None:
             return None
@@ -527,12 +531,43 @@ class TerminalServer:
         old_size = self._session_effective_size.get(session_name)
         if old_size != new_size:
             self._session_effective_size[session_name] = new_size
-            width, height = new_size
-            for cid, conn in self._client_connections.items():
-                if conn.session_name == session_name:
-                    set_pty_size(conn.pty_fd, width, height)
+            # Fix 2: Broadcast to all OTHER clients when effective size changes
+            await self._broadcast_session_info_to_all(session_name, exclude_client_id=triggering_client_id)
 
         return new_size
+
+    async def _broadcast_session_info_to_all(self, session_name: str, exclude_client_id: int | None) -> None:
+        """Broadcast SESSION_INFO to all clients attached to a session."""
+        effective_size = self._session_effective_size.get(session_name)
+        if effective_size is None:
+            return
+
+        eff_width, eff_height = effective_size
+        session_id = self._get_or_create_session_id(session_name)
+        tmux_info = tmux_get_session(session_name)
+        created_at = tmux_info.created_at if tmux_info else time.time()
+        tmux_pid = tmux_info.pid if tmux_info else 0
+        attached_count = self._count_attached_clients(session_name)
+
+        info_msg = encode_session_info(
+            session_id=session_id,
+            name=session_name,
+            pane_id=0,
+            pid=tmux_pid,
+            width=eff_width,
+            height=eff_height,
+            created_at=created_at,
+            attached_count=attached_count,
+        )
+
+        for cid, conn in self._client_connections.items():
+            if conn.session_name == session_name and cid != exclude_client_id:
+                ws = self._ws_clients.get(cid)
+                if ws is not None:
+                    try:
+                        await ws.send_bytes(info_msg.encode())
+                    except Exception:
+                        pass
 
     async def start(self) -> None:
         socket_dir = os.path.dirname(self._socket_path)
@@ -633,10 +668,12 @@ class TerminalServer:
         except Exception:
             pass
 
-    def _cleanup_client(self, client_id: int) -> None:
-        """Clean up client state."""
+    async def _cleanup_client(self, client_id: int) -> None:
+        """Clean up client state and broadcast updated effective size to remaining clients."""
         conn = self._client_connections.pop(client_id, None)
+        session_name = None
         if conn is not None:
+            session_name = conn.session_name
             self._unregister_client_size(conn.session_name, client_id)
             try:
                 os.kill(conn.pid, signal.SIGTERM)
@@ -653,6 +690,10 @@ class TerminalServer:
 
         self._ws_clients.pop(client_id, None)
         self._client_dimensions.pop(client_id, None)
+
+        # Fix 2: Broadcast updated effective size to remaining clients
+        if session_name is not None:
+            await self._update_session_size(session_name, triggering_client_id=None)
 
     async def handle_websocket_client(self, websocket: WebSocket, email: str) -> None:
         if not LOCAL_MODE and email != ALLOWED_EMAIL:
@@ -687,7 +728,7 @@ class TerminalServer:
             except Exception:
                 pass
         finally:
-            self._cleanup_client(client_id)
+            await self._cleanup_client(client_id)
 
     def _count_attached_clients(self, session_name: str) -> int:
         """Count how many clients are attached to a session."""
@@ -707,7 +748,9 @@ class TerminalServer:
     ) -> None:
         """Attach a client to a tmux session (creates if needed)."""
         self._register_client_size(session_name, client_id, width, height)
-        effective_size = await self._update_session_size(session_name)
+        # Fix 3: Each client's PTY is sized to their own dimensions
+        # Fix 2: Broadcast to other clients if effective size changed
+        effective_size = await self._update_session_size(session_name, triggering_client_id=client_id)
         eff_width, eff_height = effective_size if effective_size else (width, height)
 
         pty_fd, pid = spawn_tmux_attach(session_name, eff_width, eff_height)
@@ -824,8 +867,12 @@ class TerminalServer:
             conn.width = width
             conn.height = height
 
+            # Fix 3: Set THIS client's PTY to their own size (not effective/minimum)
+            set_pty_size(conn.pty_fd, width, height)
+
             self._register_client_size(conn.session_name, client_id, width, height)
-            effective_size = await self._update_session_size(conn.session_name)
+            # Fix 2: This broadcasts to other clients if effective size changed
+            effective_size = await self._update_session_size(conn.session_name, triggering_client_id=client_id)
             eff_width, eff_height = effective_size if effective_size else (width, height)
 
             session_id = self._get_or_create_session_id(conn.session_name)
@@ -847,7 +894,7 @@ class TerminalServer:
             await websocket.send_bytes(info_msg.encode())
 
         elif message.msg_type == MessageType.DETACH:
-            self._cleanup_client(client_id)
+            await self._cleanup_client(client_id)
             self._ws_clients[client_id] = websocket
 
         else:
