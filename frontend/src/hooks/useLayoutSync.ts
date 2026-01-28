@@ -15,6 +15,7 @@ export function useLayoutSync(dockviewApi: DockviewApi | null) {
   const providerRef = useRef<WebsocketProvider | null>(null);
   const [synced, setSynced] = useState(false);
   const lastSavedRef = useRef<string | null>(null);
+  const applyingRemoteRef = useRef(false);
 
   useEffect(() => {
     const ydoc = new Y.Doc();
@@ -51,8 +52,11 @@ export function useLayoutSync(dockviewApi: DockviewApi | null) {
         const scaleH = dockviewApi.height / parsed.grid.height;
         const isHoriz = parsed.grid.orientation === 'HORIZONTAL';
         const grid = { ...parsed.grid, width: dockviewApi.width, height: dockviewApi.height, root: scaleSizes(parsed.grid.root, isHoriz ? scaleH : scaleW, isHoriz ? scaleW : scaleH) };
+        applyingRemoteRef.current = true;
         dockviewApi.fromJSON({ ...parsed, grid }, { reuseExistingPanels: true });
+        applyingRemoteRef.current = false;
       } catch (e) {
+        applyingRemoteRef.current = false;
         console.error('Failed to apply layout:', e);
       }
     };
@@ -69,6 +73,7 @@ export function useLayoutSync(dockviewApi: DockviewApi | null) {
     const layoutMap = ydocRef.current.getMap<string>('layout');
 
     const disposable = dockviewApi.onDidLayoutChange(() => {
+      if (applyingRemoteRef.current) return;
       const serialized = JSON.stringify(dockviewApi.toJSON());
       if (serialized === lastSavedRef.current) return;
       lastSavedRef.current = serialized;

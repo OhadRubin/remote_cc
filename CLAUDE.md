@@ -30,11 +30,11 @@ npm run lint                  # ESLint
 
 Single-file Python backend using FastAPI with uv script dependencies (no requirements.txt). Key sections:
 
-- **Protocol** (lines 85-191): Binary WebSocket message encoding/decoding using `struct` format `!II` (type + length + payload)
-- **PTY Handler** (lines 195-242): Shell spawning via Python's `pty` module
-- **Session Management** (lines 249-380): `SessionManager` tracks `Session` objects containing `Pane` instances with PTY state, includes `rename_session()` method
-- **Terminal Server** (lines 400-710): WebSocket handler, PTY forwarding loop, client lifecycle
-- **FastAPI Routes** (lines 745-890): HTTP endpoints, OAuth, static file serving
+- **Protocol** (lines 165-267): Binary WebSocket message encoding/decoding using `struct` format `!II` (type + length + payload)
+- **PTY Utilities** (lines 274-298): PTY size setting, async read/write helpers
+- **Tmux Integration** (lines 306-424): Session create/kill/rename, spawning `tmux attach-session` in a PTY
+- **Terminal Server** (lines 455-813): `TerminalServer` class - WebSocket handler, PTY forwarding loop, client lifecycle. Each client gets its own PTY sized to its dimensions; tmux handles multi-client sizing internally via `aggressive-resize`.
+- **FastAPI Routes** (lines 936-1085): HTTP endpoints, OAuth, static file serving
 
 ### REST API Endpoints
 
