@@ -9,6 +9,11 @@
 #     "itsdangerous",
 #     "python-dotenv",
 #     "pycrdt",
+#     "httpx-ws",
+#     "hypercorn",
+#     "anyio",
+#     "sniffio",
+#     "pytest",
 #     "pycrdt-websocket @ git+https://github.com/y-crdt/pycrdt-websocket",
 #     "pycrdt-store",
 # ]
@@ -93,7 +98,8 @@ class PersistentWebsocketServer(WebsocketServer):
         from functools import partial
 
         if name not in self.rooms.keys():
-            store_path = LAYOUT_STORE_PATH / f"{name}.ystore"
+            safe_name = name.lstrip("/").replace("/", "_")
+            store_path = LAYOUT_STORE_PATH / f"{safe_name}.ystore"
             ystore = FileYStore(path=str(store_path))
             provider_factory = (
                 partial(self.provider_factory, path=name)
@@ -112,6 +118,7 @@ class PersistentWebsocketServer(WebsocketServer):
 
 
 yjs_server: PersistentWebsocketServer | None = None
+yjs_task: asyncio.Task | None = None
 
 # =============================================================================
 # Frontend Build
@@ -812,28 +819,22 @@ def daemonize(pid_file_path: str) -> None:
 # =============================================================================
 
 
-yjs_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global yjs_server, yjs_asgi_server, yjs_task
+    global yjs_server, yjs_asgi_server
     LAYOUT_STORE_PATH.mkdir(parents=True, exist_ok=True)
     yjs_server = PersistentWebsocketServer()
     yjs_asgi_server = ASGIServer(yjs_server)
 
-    async def run_yjs():
-        async with yjs_server:
-            await asyncio.Event().wait()
+    from anyio import create_task_group
+    async with create_task_group() as tg:
+        await tg.start(yjs_server.start)
+        yield
+        await yjs_server.stop()
+        tg.cancel_scope.cancel()
 
-    yjs_task = asyncio.create_task(run_yjs())
-    await asyncio.sleep(0.1)
-    yield
-    yjs_task.cancel()
-    try:
-        await yjs_task
-    except asyncio.CancelledError:
-        pass
     yjs_asgi_server = None
     yjs_server = None
 
