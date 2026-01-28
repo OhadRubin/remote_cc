@@ -39,6 +39,12 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
   const wsRef = useRef<WebSocket | null>(null);
   const recvBufferRef = useRef<ArrayBuffer>(new ArrayBuffer(0));
 
+  const initialSessionIdRef = useRef(sessionId);
+  const onSessionInfoRef = useRef(onSessionInfo);
+  const onStatusMessageRef = useRef(onStatusMessage);
+  onSessionInfoRef.current = onSessionInfo;
+  onStatusMessageRef.current = onStatusMessage;
+
   const [sessionActive, setSessionActive] = useState(false);
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
 
@@ -100,15 +106,16 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
     wsRef.current = ws;
 
     ws.onopen = () => {
-      if (sessionId !== undefined) {
-        onStatusMessage?.('Reconnecting to session...', 'warning');
+      const sid = initialSessionIdRef.current;
+      if (sid !== undefined) {
+        onStatusMessageRef.current?.('Reconnecting to session...', 'warning');
       } else {
-        onStatusMessage?.('Connecting...', 'info');
+        onStatusMessageRef.current?.('Connecting...', 'info');
       }
       ws.send(encodeIdentify(term.cols, term.rows));
 
-      if (sessionId !== undefined) {
-        ws.send(encodeAttach(sessionId));
+      if (sid !== undefined) {
+        ws.send(encodeAttach(sid));
       } else {
         const sessionName = `session-${Date.now().toString(36)}`;
         ws.send(encodeNewSession(sessionName));
@@ -131,31 +138,31 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
           const info = decodeSessionInfo(msg.payload);
           setSessionInfo(info);
           setSessionActive(true);
-          onSessionInfo?.(info);
-          if (sessionId !== undefined) {
-            onStatusMessage?.('Reconnected!', 'success');
+          onSessionInfoRef.current?.(info);
+          if (initialSessionIdRef.current !== undefined) {
+            onStatusMessageRef.current?.('Reconnected!', 'success');
           } else {
-            onStatusMessage?.('Session ready.', 'success');
+            onStatusMessageRef.current?.('Session ready.', 'success');
           }
         } else if (msg.type === MessageType.ERROR) {
           const view = new DataView(msg.payload.buffer, msg.payload.byteOffset);
           const errLen = view.getUint32(0, false);
           const errText = new TextDecoder().decode(msg.payload.slice(4, 4 + errLen));
-          onStatusMessage?.(`Error: ${errText}`, 'error');
+          onStatusMessageRef.current?.(`Error: ${errText}`, 'error');
         } else if (msg.type === MessageType.SHELL_EXITED) {
-          onStatusMessage?.('Shell exited', 'warning');
+          onStatusMessageRef.current?.('Shell exited', 'warning');
           setSessionActive(false);
         }
       }
     };
 
     ws.onclose = () => {
-      onStatusMessage?.('Disconnected', 'error');
+      onStatusMessageRef.current?.('Disconnected', 'error');
       setSessionActive(false);
     };
 
     ws.onerror = () => {
-      onStatusMessage?.('Connection error', 'error');
+      onStatusMessageRef.current?.('Connection error', 'error');
     };
 
     const dataDisposable = term.onData((data) => {
@@ -179,7 +186,7 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
       fitAddonRef.current = null;
       wsRef.current = null;
     };
-  }, [sessionId, onSessionInfo, onStatusMessage]);
+  }, []);
 
   return {
     termRef,
