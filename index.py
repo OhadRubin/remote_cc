@@ -22,7 +22,7 @@
 Multi-tab terminal UI with inlined txtmux server.
 
 Run:
-    ./index.py
+./index.py
 
     # Then open http://localhost:8045
 """
@@ -138,14 +138,14 @@ def _ensure_frontend_built() -> None:
         return
 
     src_dir = frontend_dir / "src"
-    if src_dir.exists():
-        src_files = list(src_dir.rglob("*"))
-        if src_files:
-            src_mtime = max(f.stat().st_mtime for f in src_files if f.is_file())
-            dist_mtime = dist_index.stat().st_mtime
-            if src_mtime > dist_mtime:
-                print("Frontend sources changed, rebuilding...")
-                subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
+    subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
+    # if src_dir.exists():
+    #     src_files = list(src_dir.rglob("*"))
+    #     if src_files:
+    #         src_mtime = max(f.stat().st_mtime for f in src_files if f.is_file())
+    #         dist_mtime = dist_index.stat().st_mtime
+    #         if src_mtime > dist_mtime:
+    #             print("Frontend sources changed, rebuilding...")
 
 def ensure_frontend_built() -> None:
     try:

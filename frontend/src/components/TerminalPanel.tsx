@@ -19,6 +19,7 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
       const suffix = params.sessionId !== undefined ? ' (reconnected)' : '';
       api.setTitle(`${info.name}${suffix}`);
       panelSessionMap.set(panelId, info.sessionId);
+      api.updateParameters({ sessionId: info.sessionId });
     },
     [api, params.sessionId, panelId]
   );

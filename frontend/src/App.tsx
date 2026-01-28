@@ -47,13 +47,6 @@ export function App() {
     updatePanelCount();
   }, [dockviewApi, updatePanelCount]);
 
-  const closeAllPanels = useCallback(() => {
-    if (!dockviewApi) return;
-    const panels = [...dockviewApi.panels];
-    panels.forEach((panel) => panel.api.close());
-    updatePanelCount();
-  }, [dockviewApi, updatePanelCount]);
-
   const onReady = useCallback((event: DockviewReadyEvent) => {
     setDockviewApi(event.api);
 
@@ -62,8 +55,9 @@ export function App() {
     });
   }, []);
 
-  const autoReconnectLastSession = useCallback(async () => {
+  const autoReconnectOrCreateTab = useCallback(async () => {
     if (!dockviewApi) return;
+    let reconnected = false;
     try {
       const response = await fetch('/api/last-session');
       const data = await response.json();
@@ -83,19 +77,29 @@ export function App() {
             params: { sessionId: data.session_id },
           });
           updatePanelCount();
+          reconnected = true;
         }
       }
     } catch (e) {
       console.error('Failed to auto-reconnect:', e);
+    }
+    if (!reconnected) {
+      const id = generatePanelId();
+      dockviewApi.addPanel({
+        id,
+        component: 'terminal',
+        title: 'New Tab',
+      });
+      updatePanelCount();
     }
   }, [dockviewApi, updatePanelCount]);
 
   useEffect(() => {
     if (!layoutSync.synced || !dockviewApi) return;
     if (dockviewApi.panels.length === 0) {
-      autoReconnectLastSession();
+      autoReconnectOrCreateTab();
     }
-  }, [layoutSync.synced, dockviewApi, autoReconnectLastSession]);
+  }, [layoutSync.synced, dockviewApi, autoReconnectOrCreateTab]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -287,27 +291,12 @@ export function App() {
                   {isMaximized ? 'collapse_content' : 'expand_content'}
                 </span>
               </div>
-              <div className="action action-danger" onClick={closeAllPanels} title="Close All">
-                <span className="material-symbols-outlined">close</span>
-              </div>
             </>
           )}
         </div>
       );
     };
-  }, [closeAllPanels]);
-
-  const createFirstTab = useCallback(() => {
-    if (!dockviewApi) return;
-    const id = generatePanelId();
-    const title = 'New Tab';
-    dockviewApi.addPanel({
-      id,
-      component: 'terminal',
-      title,
-    });
-    updatePanelCount();
-  }, [dockviewApi, updatePanelCount]);
+  }, []);
 
   return (
     <ToastProvider>
@@ -321,16 +310,6 @@ export function App() {
             leftHeaderActionsComponent={LeftHeaderActions}
             rightHeaderActionsComponent={RightHeaderActions}
           />
-          {panelCount === 0 && (
-            <div className="empty-state">
-              <button onClick={createFirstTab} className="empty-state-btn">
-                + New Tab
-              </button>
-              <button onClick={() => setSidebarOpen(true)} className="empty-state-btn">
-                Sessions
-              </button>
-            </div>
-          )}
         </div>
         <StatusBar panelCount={panelCount} wsConnected={panelCount > 0} />
         <SessionsSidebar
