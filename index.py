@@ -119,7 +119,7 @@ yjs_server: PersistentWebsocketServer | None = None
 
 import subprocess
 
-def ensure_frontend_built() -> None:
+def _ensure_frontend_built() -> None:
     frontend_dir = Path(__file__).parent / "frontend"
     dist_dir = frontend_dir / "dist"
     dist_index = dist_dir / "index.html"
@@ -139,6 +139,17 @@ def ensure_frontend_built() -> None:
             if src_mtime > dist_mtime:
                 print("Frontend sources changed, rebuilding...")
                 subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
+
+def ensure_frontend_built() -> None:
+    try:
+        _ensure_frontend_built()
+    except Exception as e:
+        print(f"Failed to build frontend, wiping dist directory and retrying...")
+        import shutil
+        shutil.rmtree(Path(__file__).parent / "frontend" / "dist", ignore_errors=True)
+        os.makedirs("frontend/dist/assets", exist_ok=True)
+        _ensure_frontend_built()
+        print("Frontend built successfully")
 
 # =============================================================================
 # Protocol
@@ -477,7 +488,7 @@ class TerminalServer:
 
         import uvicorn
 
-        config = uvicorn.Config(app, host="0.0.0.0", port=self._http_port, log_level="warning")
+        config = uvicorn.Config(app, host="0.0.0.0", port=self._http_port, log_level="info")
         server = uvicorn.Server(config)
         asyncio.create_task(server.serve())
 
@@ -828,6 +839,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Terminal", lifespan=lifespan)
+os.makedirs("frontend/dist/assets", exist_ok=True)
+
 app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
 
 oauth = OAuth()
