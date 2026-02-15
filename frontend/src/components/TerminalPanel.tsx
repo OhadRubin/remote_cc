@@ -43,6 +43,8 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
   });
 
   const touchScrollRef = useRef<{ y: number; accumulated: number } | null>(null);
+  const lastSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const resizeTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     const container = termRef.current;
@@ -50,21 +52,30 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
 
     const observer = new ResizeObserver((entries) => {
       const { width, height } = entries[0].contentRect;
-      console.log(`[TerminalPanel ${panelId}] ResizeObserver: ${Math.round(width)}x${Math.round(height)}`);
-      sendResize();
+      const w = Math.round(width);
+      const h = Math.round(height);
+
+      if (lastSizeRef.current?.width === w && lastSizeRef.current?.height === h) {
+        return;
+      }
+      lastSizeRef.current = { width: w, height: h };
+
+      if (resizeTimeoutRef.current) {
+        clearTimeout(resizeTimeoutRef.current);
+      }
+      resizeTimeoutRef.current = window.setTimeout(() => {
+        console.log(`[TerminalPanel ${panelId}] ResizeObserver: ${w}x${h}`);
+        sendResize();
+      }, 100);
     });
     observer.observe(container);
-    return () => observer.disconnect();
+
+    return () => {
+      observer.disconnect();
+      if (resizeTimeoutRef.current) clearTimeout(resizeTimeoutRef.current);
+    };
   }, [sendResize, panelId]);
 
-  useEffect(() => {
-    const viewport = window.visualViewport;
-    if (!viewport) return;
-
-    const handleViewportResize = () => sendResize();
-    viewport.addEventListener('resize', handleViewportResize);
-    return () => viewport.removeEventListener('resize', handleViewportResize);
-  }, [sendResize]);
 
   useEffect(() => {
     const container = termRef.current;

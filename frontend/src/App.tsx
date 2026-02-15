@@ -41,10 +41,38 @@ export function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [renameModal, setRenameModal] = useState<RenameModalState | null>(null);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   const layoutSync = useLayoutSync(dockviewApi);
 
   const longPressTimeoutRef = useRef<number | null>(null);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Use visualViewport to track actual visible height (accounts for keyboard)
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) {
+      console.log('[VisualViewport] API not available');
+      return;
+    }
+
+    const handleResize = () => {
+      const height = Math.round(viewport.height);
+      console.log(`[VisualViewport] resize: height=${height}`);
+      setViewportHeight(prev => {
+        if (prev === height) return prev;
+        requestAnimationFrame(() => {
+          window.dispatchEvent(new Event('resize'));
+        });
+        return height;
+      });
+    };
+
+    // Set initial value
+    handleResize();
+
+    viewport.addEventListener('resize', handleResize);
+    return () => viewport.removeEventListener('resize', handleResize);
+  }, []);
 
   const updatePanelCount = useCallback(() => {
     if (dockviewApi) {
@@ -413,9 +441,11 @@ export function App() {
     };
   }, []);
 
+  const containerHeight = viewportHeight !== null ? `${viewportHeight}px` : '100dvh';
+
   return (
     <ToastProvider>
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: containerHeight }}>
         <div style={{ flex: 1, position: 'relative' }}>
           <DockviewReact
             className="dockview-theme-dark"

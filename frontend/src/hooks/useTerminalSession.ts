@@ -30,6 +30,7 @@ interface UseTerminalSessionResult {
   disconnect: () => void;
   sendResize: () => void;
   sendInput: (data: string) => void;
+  focus: () => void;
 }
 
 export function useTerminalSession(options: UseTerminalSessionOptions): UseTerminalSessionResult {
@@ -69,6 +70,10 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(encodeInput(data));
     }
+  }, []);
+
+  const focus = useCallback(() => {
+    termInstanceRef.current?.focus();
   }, []);
 
   useEffect(() => {
@@ -205,5 +210,6 @@ export function useTerminalSession(options: UseTerminalSessionOptions): UseTermi
     disconnect,
     sendResize,
     sendInput,
+    focus,
   };
 }
